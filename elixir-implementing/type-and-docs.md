@@ -537,6 +537,109 @@ end
 
 ---
 
+## `binary()` / `String.t()` / `iodata()` — Which?
+
+These three types overlap but communicate different intent:
+
+| Type | Meaning | Use when |
+|---|---|---|
+| `String.t()` | UTF-8 binary (by convention — same as `binary()` at runtime) | The value is human-readable text |
+| `binary()` | Any byte sequence | Raw bytes, crypto output, protocol frame |
+| `iodata()` | `binary() \| [binary() \| byte() \| iodata()]` | Something you'll pass to I/O or concat heavily (avoid flattening) |
+| `iolist()` | Strict iodata without a leading binary (list of bytes/binaries/iolists) | Same as iodata, but commits to list form |
+
+```elixir
+# GOOD — text intended for humans
+@spec greet(String.t()) :: String.t()
+def greet(name), do: "Hello, #{name}"
+
+# GOOD — raw binary (e.g., crypto)
+@spec mac(binary(), binary()) :: binary()
+def mac(key, data), do: :crypto.mac(:hmac, :sha256, key, data)
+
+# GOOD — accepts iodata; caller can pass list of parts without flattening
+@spec log_line(iodata()) :: :ok
+def log_line(entry), do: IO.write([entry, "\n"])
+```
+
+**Rule:** writing functions that accept user text → `String.t()`. Writing functions that build big strings (logs, responses, SQL) → `iodata()` to enable list-building without flattening. Protocol / crypto / raw bytes → `binary()`.
+
+### Output types
+
+Functions that build a result for I/O should return **the same type they accept** when possible:
+
+```elixir
+# BAD — forces caller to concat even if they'd chain
+@spec format(Event.t()) :: binary()
+def format(%Event{} = e), do: IO.iodata_to_binary([e.type, ": ", e.msg])
+
+# GOOD — caller can chain without re-flattening
+@spec format(Event.t()) :: iodata()
+def format(%Event{} = e), do: [e.type, ": ", e.msg]
+```
+
+## Map Type — Closed vs Open
+
+Map types come in three flavors:
+
+```elixir
+# Closed — EXACTLY these keys, no more, no fewer
+@type closed :: %{name: String.t(), age: integer()}
+
+# Open — these keys required, others allowed
+@type open :: %{required(:name) => String.t(), optional(atom()) => term()}
+# Or the short form (which is open):
+@type open_short :: %{name: String.t(), age: integer()}   # in specs, this is OPEN
+
+# Optional keys — may or may not be present
+@type with_optional :: %{
+        required(:name) => String.t(),
+        optional(:age) => integer()
+      }
+```
+
+**Important:** `%{key: type}` syntax is **open** — extra keys are allowed. For a strictly closed shape, use struct types (`%User{}`).
+
+```elixir
+# A struct's type is closed by default
+@type t :: %__MODULE__{id: pos_integer(), email: String.t()}
+# This does NOT allow additional keys
+```
+
+### Closed vs open decision
+
+| Scenario | Use |
+|---|---|
+| Public API for an HTTP response | Open (`%{required(:status) => ...}`) — endpoints evolve, callers shouldn't break |
+| Internal struct | Closed (struct type) — compile-time safety |
+| A "config" map | Closed (for small configs) or open with optional (for extensible) |
+| Catching stray fields (for audit) | Open with specific atom keys + `optional(atom())` catch-all |
+
+## `dynamic()` — Gradual Typing
+
+From Elixir 1.17+, `dynamic()` opts a value out of static inference. The inferrer treats `dynamic()` as "could be any type" for warnings — meaning incompatible usage won't generate a warning AS LONG AS some path through `dynamic()` might succeed.
+
+```elixir
+# Without dynamic — strict
+@spec process(atom() | integer()) :: String.t()
+def process(x), do: Integer.to_string(x)
+# Warning: atom() given to Integer.to_string/1 will fail
+
+# With dynamic — gradual
+@spec process(dynamic(atom() | integer())) :: String.t()
+def process(x), do: Integer.to_string(x)
+# No warning — integer() path succeeds, so it "might work"
+```
+
+**When to use:**
+- Bridging untyped Erlang code.
+- Values from `Map.get(m, k)` where the key's type isn't statically known.
+- Migrating a legacy module — apply `dynamic()` to silence noise while tightening other specs.
+
+**When NOT to use:**
+- Internal code where you want Dialyzer to catch mismatches.
+- Public API — `dynamic()` leaks to callers.
+
 ## Set-theoretic Types (Elixir 1.17+)
 
 New syntax for types with `or`/`not`:
@@ -548,11 +651,40 @@ New syntax for types with `or`/`not`:
 # Classic union still works
 @spec f(integer() | String.t()) :: String.t()
 
-# Dynamic type (opt out of inference)
-@spec f(dynamic()) :: term()
+# Intersection (for multi-clause specs that must handle both types)
+@spec f(integer()) :: integer()
+@spec f(boolean()) :: boolean()
+# = function that handles integer→integer AND boolean→boolean
 ```
 
 The classic pipe syntax (`|`) remains idiomatic for most code.
+
+### Common @spec patterns by framework
+
+```elixir
+# GenServer callbacks
+@spec init(opts :: keyword()) :: {:ok, state()} | {:stop, term()}
+@spec handle_call(term(), GenServer.from(), state()) ::
+        {:reply, term(), state()} | {:noreply, state()} | {:stop, term(), term(), state()}
+
+# Plug
+@spec init(keyword()) :: keyword()
+@spec call(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+
+# Phoenix controller action
+@spec index(Plug.Conn.t(), map()) :: Plug.Conn.t()
+
+# LiveView callbacks
+@spec mount(map(), map(), Phoenix.LiveView.Socket.t()) ::
+        {:ok, Phoenix.LiveView.Socket.t()} | {:ok, Phoenix.LiveView.Socket.t(), keyword()}
+@spec handle_event(String.t(), map(), Phoenix.LiveView.Socket.t()) ::
+        {:noreply, Phoenix.LiveView.Socket.t()} | {:reply, map(), Phoenix.LiveView.Socket.t()}
+
+# Ecto context function
+@spec list_users(keyword()) :: [User.t()]
+@spec get_user!(pos_integer()) :: User.t()
+@spec register_user(map()) :: {:ok, User.t()} | {:error, Ecto.Changeset.t()}
+```
 
 ---
 

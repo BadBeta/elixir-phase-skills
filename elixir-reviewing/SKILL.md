@@ -52,10 +52,11 @@ The core SKILL.md carries the always-loaded rules, severity guidance, workflow, 
 
 | Subskill | Purpose | Load when... |
 |---|---|---|
+| [anti-patterns-catalog.md](anti-patterns-catalog.md) | Organized anti-patterns by category (code, process/OTP, Ecto/data, architecture/design, testing, security, config) with BAD/GOOD for each | General review / scanning a diff for named anti-patterns |
 | [debugging-playbook-deep.md](debugging-playbook-deep.md) | Symptom → diagnosis flow for crashes, mailbox buildup, memory growth, slow response, flaky tests, Dialyzer warnings, CPU pegging | Investigating a specific bug |
 | [profiling-playbook-deep.md](profiling-playbook-deep.md) | Tool selection + usage: `:timer.tc`, Benchee, fprof/eprof/cprof/tprof, `:recon`, `:observer`, telemetry, memory analysis | Measuring or optimizing performance |
 | [performance-catalog.md](performance-catalog.md) | 32 common pitfalls with symptom → root cause → fix (data structures, Enum/Stream, OTP, Ecto, memory, serialization, Phoenix) | Looking for performance issues in a review |
-| [security-audit-deep.md](security-audit-deep.md) | Security checklist: input validation, injection, auth/authz, logging, crypto, Phoenix/Ecto-specific pitfalls | Conducting a security review |
+| [security-audit-deep.md](security-audit-deep.md) | Security checklist: input validation, injection, auth/authz, logging, crypto (incl. `:crypto` primitive decision table), Phoenix/Ecto-specific pitfalls | Conducting a security review |
 
 **Cross-skill references:** for WHAT to write (implementation) → `elixir-implementing`. For WHY it's shaped that way (architecture) → `elixir-planning`.
 
@@ -256,6 +257,8 @@ Every review finding needs a severity. Without it, the reviewer defaults to "eve
 ---
 
 ## 7. Review Checklists — What to Flag
+
+> **Depth:** For the consolidated catalog of named anti-patterns organized by category (code / process / Ecto / architecture / testing / security / config), each with a BAD/GOOD pair — load [anti-patterns-catalog.md](anti-patterns-catalog.md). Use that when you spot something "off" and want to name it; use this §7 when you want to scan a diff systematically by area.
 
 Each subsection is a scanning checklist. Read left to right: "if you see this" → "flag it because" → "suggest this" → "severity". Links to the owning skill sections explain *why* for the author.
 

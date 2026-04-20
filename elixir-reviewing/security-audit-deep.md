@@ -349,6 +349,90 @@ end
 
 ## Crypto Pitfalls
 
+### `:crypto` — Which Primitive?
+
+| When you need to... | Use | NOT |
+|---|---|---|
+| Hash a password | `Bcrypt.hash_pwd_salt/1` or `Argon2.hash_pwd_salt/1` | `:crypto.hash(:sha256, ...)` — too fast, brute-forceable |
+| Generic message digest (checksum, content hash) | `:crypto.hash(:sha256, data)` or `:crypto.hash(:blake2b, data)` | MD5, SHA1 (broken) |
+| HMAC (authenticated message) | `:crypto.mac(:hmac, :sha256, key, data)` | Plain hash + concat (length-extension attack) |
+| Encrypt + authenticate (at rest or in transit) | AEAD: `:crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, pt, aad, true)` | Plain `:aes_256_cbc` (no authentication) |
+| Encrypt a Phoenix session/token | `Phoenix.Token.encrypt/3` | Hand-rolled AES |
+| Sign (non-repudiation, public verify) | `:public_key.sign/3` with `:ecdsa` or `:rsa` | HMAC (HMAC is symmetric; can't be publicly verified) |
+| Random bytes / ID / salt | `:crypto.strong_rand_bytes/1` | `:rand.uniform` (predictable PRNG) |
+| Random URL-safe token | `:crypto.strong_rand_bytes(32) \|> Base.url_encode64(padding: false)` | `System.unique_integer()` |
+| Key agreement (ECDH) | `:crypto.generate_key(:ecdh, :x25519)` + `:crypto.compute_key(:ecdh, ...)` | Roll-your-own DH |
+| Derive a key from a password | `:crypto.pbkdf2_hmac(:sha256, pwd, salt, iters, len)` or `Argon2` | Raw hash of password |
+| Derive multiple keys from one master key | HKDF: `:hkdf_erlang` / `:crypto.hkdf/5` (OTP 25+) | Concatenating SHA outputs |
+| Constant-time equality (token / HMAC compare) | `Plug.Crypto.secure_compare/2` | `==` (timing attack) |
+
+**Rules of thumb:**
+
+- **Never hash a password with `:crypto.hash`.** Use Bcrypt or Argon2 — they're designed to be slow.
+- **Always use AEAD** (authenticated encryption) for confidentiality. Plain CBC/CTR lets attackers tamper silently.
+- **IV / nonce uniqueness matters.** `:crypto.strong_rand_bytes(12)` for GCM nonces. Never reuse a `(key, iv)` pair for AEAD.
+- **Store the IV / salt alongside the ciphertext.** They're not secret; they must be retrievable.
+
+### Symmetric encryption (AEAD) — recipe
+
+```elixir
+def encrypt(plaintext, key) when byte_size(key) == 32 do
+  iv = :crypto.strong_rand_bytes(12)
+  {ciphertext, tag} =
+    :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", true)
+  # Store iv <> tag <> ciphertext (iv and tag are not secret)
+  iv <> tag <> ciphertext
+end
+
+def decrypt(<<iv::binary-12, tag::binary-16, ciphertext::binary>>, key)
+    when byte_size(key) == 32 do
+  case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ciphertext, "", tag, false) do
+    :error -> {:error, :invalid_ciphertext_or_key}
+    pt -> {:ok, pt}
+  end
+end
+```
+
+### HMAC recipe
+
+```elixir
+def sign(data, secret) do
+  :crypto.mac(:hmac, :sha256, secret, data)
+end
+
+def verify(data, mac, secret) do
+  expected = :crypto.mac(:hmac, :sha256, secret, data)
+  Plug.Crypto.secure_compare(expected, mac)   # constant-time!
+end
+```
+
+### ECDH key agreement recipe
+
+```elixir
+# Alice generates keypair
+{alice_pub, alice_priv} = :crypto.generate_key(:ecdh, :x25519)
+
+# Bob generates keypair
+{bob_pub, bob_priv} = :crypto.generate_key(:ecdh, :x25519)
+
+# Both compute the same shared secret
+shared_a = :crypto.compute_key(:ecdh, bob_pub, alice_priv, :x25519)
+shared_b = :crypto.compute_key(:ecdh, alice_pub, bob_priv, :x25519)
+# shared_a == shared_b
+
+# Derive a usable key via HKDF
+key = :crypto.hkdf(:sha256, shared_a, "salt", "my-app-v1", 32)
+```
+
+### Key derivation (PBKDF2 — legacy; prefer Argon2)
+
+```elixir
+# For derivation from a password (use Argon2 for new designs)
+salt = :crypto.strong_rand_bytes(16)
+key = :crypto.pbkdf2_hmac(:sha256, password, salt, 600_000, 32)
+# Store: salt <> key in your DB
+```
+
 ### Use `:crypto.strong_rand_bytes/1` for secrets
 
 ```elixir

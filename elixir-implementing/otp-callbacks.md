@@ -529,6 +529,251 @@ Process.demonitor(ref, [:flush])
 
 ---
 
+## GenStage — Producer / Consumer / Producer-Consumer Templates
+
+GenStage is for back-pressured streaming pipelines. Use when: (a) bounded memory under load, (b) coordinate producer rate with consumer capacity, (c) multiple stages process events in series.
+
+**For when-to-use decision** (GenStage vs Flow vs Broadway vs Task.async_stream vs Oban), see `../elixir-planning/integration-patterns.md`.
+
+### Producer
+
+```elixir
+defmodule MyApp.EventProducer do
+  use GenStage
+
+  def start_link(opts), do: GenStage.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @impl true
+  def init(_opts) do
+    # :queue holds buffered events; demand tracks consumer asks
+    {:producer, %{queue: :queue.new(), demand: 0}}
+  end
+
+  # Consumers ask for N events
+  @impl true
+  def handle_demand(incoming_demand, %{demand: d} = state) do
+    dispatch(%{state | demand: d + incoming_demand})
+  end
+
+  # External submission
+  def enqueue(event), do: GenStage.cast(__MODULE__, {:enqueue, event})
+
+  @impl true
+  def handle_cast({:enqueue, event}, state) do
+    dispatch(%{state | queue: :queue.in(event, state.queue)})
+  end
+
+  defp dispatch(%{demand: 0} = state), do: {:noreply, [], state}
+  defp dispatch(%{queue: q, demand: d} = state) do
+    {events, new_q, new_d} = take_events(q, d, [])
+    {:noreply, Enum.reverse(events), %{state | queue: new_q, demand: new_d}}
+  end
+
+  defp take_events(q, 0, acc), do: {acc, q, 0}
+  defp take_events(q, n, acc) do
+    case :queue.out(q) do
+      {{:value, e}, rest} -> take_events(rest, n - 1, [e | acc])
+      {:empty, _} -> {acc, q, n}
+    end
+  end
+end
+```
+
+### Consumer
+
+```elixir
+defmodule MyApp.EventConsumer do
+  use GenStage
+
+  def start_link(opts), do: GenStage.start_link(__MODULE__, opts)
+
+  @impl true
+  def init(_opts) do
+    {:consumer, %{}, subscribe_to: [{MyApp.EventProducer, max_demand: 100, min_demand: 50}]}
+  end
+
+  @impl true
+  def handle_events(events, _from, state) do
+    Enum.each(events, &process/1)
+    {:noreply, [], state}   # consumers emit no events
+  end
+
+  defp process(event), do: # ... actual work
+end
+```
+
+**Key subscription options:**
+- `max_demand` — max events per batch (sizes memory per consumer)
+- `min_demand` — ask for more only after processing down to this level
+
+### Producer-Consumer (transform stage)
+
+```elixir
+defmodule MyApp.EnrichStage do
+  use GenStage
+
+  def start_link(opts), do: GenStage.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @impl true
+  def init(_opts) do
+    {:producer_consumer, %{},
+     subscribe_to: [{MyApp.EventProducer, max_demand: 100}]}
+  end
+
+  @impl true
+  def handle_events(events, _from, state) do
+    enriched = Enum.map(events, &enrich/1)
+    {:noreply, enriched, state}
+  end
+
+  defp enrich(event), do: Map.put(event, :processed_at, DateTime.utc_now())
+end
+```
+
+### Supervision wiring
+
+```elixir
+children = [
+  MyApp.EventProducer,
+  MyApp.EnrichStage,
+  %{
+    id: :consumer_pool,
+    start: {Supervisor, :start_link, [
+      Enum.map(1..5, fn i ->
+        Supervisor.child_spec({MyApp.EventConsumer, []}, id: {:consumer, i})
+      end),
+      [strategy: :one_for_one]
+    ]}
+  }
+]
+```
+
+---
+
+## Broadway — Data Ingestion Pipeline Template
+
+Broadway is built on GenStage, specialized for **data ingestion** from message brokers (SQS, RabbitMQ, Kafka, Pub/Sub). Handles batching, retries, partitioning, rate limiting out of the box.
+
+```elixir
+defmodule MyApp.OrderPipeline do
+  use Broadway
+
+  alias Broadway.Message
+
+  def start_link(_opts) do
+    Broadway.start_link(__MODULE__,
+      name: __MODULE__,
+      producer: [
+        module: {BroadwaySQS.Producer, queue_url: "https://sqs.../orders"},
+        concurrency: 1
+      ],
+      processors: [
+        default: [concurrency: 10, max_demand: 20]
+      ],
+      batchers: [
+        inserts: [concurrency: 2, batch_size: 100, batch_timeout: 1_000],
+        errors: [concurrency: 1, batch_size: 10]
+      ]
+    )
+  end
+
+  # Per-message — fast, parallel
+  @impl true
+  def handle_message(_, %Message{data: data} = msg, _ctx) do
+    case Jason.decode(data) do
+      {:ok, order} ->
+        msg
+        |> Message.update_data(fn _ -> order end)
+        |> Message.put_batcher(:inserts)
+      {:error, _} ->
+        msg |> Message.failed(:invalid_json) |> Message.put_batcher(:errors)
+    end
+  end
+
+  # Per-batch — bulk inserts, commits
+  @impl true
+  def handle_batch(:inserts, messages, _batch_info, _ctx) do
+    orders = Enum.map(messages, & &1.data)
+    {count, _} = MyApp.Repo.insert_all(MyApp.Order, orders, on_conflict: :nothing)
+    Logger.info("Inserted #{count}/#{length(orders)} orders")
+    messages   # Broadway auto-acks
+  end
+
+  def handle_batch(:errors, messages, _batch_info, _ctx) do
+    Enum.each(messages, &Logger.warning("Failed: #{inspect(&1.data)}"))
+    messages
+  end
+
+  # Optional — called on exceptions; decide retry vs final-fail
+  @impl true
+  def handle_failed(messages, _ctx) do
+    Enum.map(messages, fn msg ->
+      if msg.metadata.attempt < 3 do
+        msg   # Retry
+      else
+        Message.configure_ack(msg, on_failure: :ack)   # Give up
+      end
+    end)
+  end
+end
+```
+
+### Broadway options cheat sheet
+
+| Option | Purpose |
+|---|---|
+| `producer.module` | Source: `BroadwaySQS.Producer`, `BroadwayRabbitMQ.Producer`, `BroadwayKafka.Producer`, `OffBroadway.SQS.Producer` |
+| `producer.concurrency` | Parallel producer processes |
+| `processors.*.concurrency` | Parallel message handlers |
+| `processors.*.max_demand` | Batch pulled per processor |
+| `batchers.*.batch_size` | Max messages per batch |
+| `batchers.*.batch_timeout` | Emit batch after N ms even if not full |
+| `batchers.*.concurrency` | Parallel batch handlers |
+| `partition_by` | Shard messages to preserve per-key order |
+
+### Partitioning for ordering
+
+```elixir
+# Messages with same user_id always go to same processor
+Broadway.start_link(__MODULE__,
+  # ...
+  processors: [default: [concurrency: 10]],
+  partition_by: fn msg ->
+    %{user_id: uid} = Jason.decode!(msg.data)
+    :erlang.phash2(uid)
+  end
+)
+```
+
+---
+
+## Flow — Parallel Data Transformation Template
+
+`Flow` builds on GenStage for **one-shot parallel processing** of an enumerable — MapReduce for in-process collections.
+
+```elixir
+# Count word frequencies in parallel from a large file
+File.stream!("big.txt")
+|> Flow.from_enumerable(stages: 4, max_demand: 100)
+|> Flow.flat_map(&String.split(&1, ~r/\W+/))
+|> Flow.partition()                        # shard by hash; same word → same stage
+|> Flow.reduce(fn -> %{} end, fn word, acc -> Map.update(acc, word, 1, &(&1 + 1)) end)
+|> Flow.on_trigger(& &1)
+|> Enum.to_list()
+```
+
+### Task.async_stream vs Flow vs Broadway vs GenStage vs Oban
+
+| Need | Use |
+|---|---|
+| One-shot parallel map over fixed collection | `Task.async_stream` |
+| Parallel map-reduce with grouping/partitioning | `Flow` |
+| Long-lived pipeline from message broker | `Broadway` |
+| Custom streaming pipeline (non-standard source) | `GenStage` directly |
+| Scheduled / retryable background jobs | `Oban` |
+
+---
+
 ## Common Anti-Patterns (BAD / GOOD)
 
 ### 1. Blocking `init/1`

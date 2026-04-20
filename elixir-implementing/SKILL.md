@@ -32,13 +32,14 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 
 | Subskill | Purpose | Load when writing... |
 |---|---|---|
-| [idioms-reference.md](idioms-reference.md) | Pattern matching, guards, `with`, pipelines, `Enum`/`Stream`/`for`, captures — construct-level syntax templates | Daily Elixir code — idiomatic control flow and transforms |
+| [idioms-reference.md](idioms-reference.md) | Pattern matching (incl. pin operator advanced, `<>` prefix matching, multi-clause default args, assertive matching), guards, `with`, pipelines, `Enum`/`Stream`/`for`, captures | Daily Elixir code — idiomatic control flow and transforms |
 | [data-reference.md](data-reference.md) | Maps, structs, keywords, tuples, lists, MapSet, binaries, IO lists — complexity table + call patterns | Anything touching data-structure manipulation |
-| [otp-callbacks.md](otp-callbacks.md) | GenServer/Task/Agent/`:gen_statem` callback templates, supervisor child specs, Registry via-tuples, ETS calls | GenServer/Task/supervisor code |
+| [otp-callbacks.md](otp-callbacks.md) | GenServer/Task/Agent/`:gen_statem` callback templates, supervisor child specs, Registry via-tuples, ETS calls, **GenStage/Broadway/Flow templates** | GenServer/Task/supervisor/streaming code |
 | [ecto-patterns.md](ecto-patterns.md) | Schemas, changesets, queries, migrations, Multi, custom types, schemaless changesets | Any Ecto code — schema or query |
 | [testing-patterns.md](testing-patterns.md) | ExUnit, Mox, sandbox setup, factories, LiveView/Channel/Oban test helpers, property tests | Any test file |
-| [type-and-docs.md](type-and-docs.md) | `@spec`, `@type`, `@doc`, `@moduledoc`, doctests, Dialyzer config, common built-in types | Adding types and documentation |
+| [type-and-docs.md](type-and-docs.md) | `@spec`, `@type`, `@doc`, `@moduledoc`, doctests, Dialyzer config, built-in types, **`binary`/`String.t`/`iodata` decision**, **closed vs open map types**, **`dynamic()` gradual typing** | Adding types and documentation |
 | [networking-patterns.md](networking-patterns.md) | `:gen_tcp`/`:gen_udp` templates, acceptor loops, protocol framing (length-prefix, line, TLV), Ranch/Thousand Island handlers, TLS, HTTP clients | TCP/UDP/HTTP code |
+| [code-style.md](code-style.md) | `.formatter.exs` template, Credo check catalog, module organization, function ordering, sigil selection, `defdelegate` decision, readable-code patterns, style BAD/GOOD | Any Elixir code — ensures style-compliant output |
 
 **For architecture-level decisions** (which constructs/processes/contexts to use BEFORE writing code), load `elixir-planning`. **For critique of existing code**, load `elixir-reviewing`.
 

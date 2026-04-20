@@ -66,6 +66,171 @@ case user do
 end
 ```
 
+### Pin operator — advanced uses
+
+**Pin as map key** (essential for dynamic key lookup):
+
+```elixir
+# Without the pin, `key` would be bound to whatever key matches first
+key = :email
+%{^key => value} = %{email: "a@b.c", name: "Alice"}
+# value = "a@b.c"
+```
+
+**Double pin** (assert both key AND value):
+
+```elixir
+expected_id = 42
+expected_role = :admin
+
+case user do
+  %{id: ^expected_id, role: ^expected_role} -> :match
+  _ -> :mismatch
+end
+```
+
+**Pin in `receive` — correlate async responses** (the definitive use case):
+
+```elixir
+# Send a request with a unique ref; only accept the matching reply
+ref = make_ref()
+send(worker, {:request, self(), ref, payload})
+
+receive do
+  {:reply, ^ref, result} -> {:ok, result}
+after
+  5_000 -> {:error, :timeout}
+end
+# Other messages with different refs stay in the mailbox
+```
+
+**Pin in comprehension generators** (filter by known value):
+
+```elixir
+target_user_id = 42
+
+# Only select events for the target user
+for {:event, %{user_id: ^target_user_id} = e} <- events, do: e
+```
+
+**Pin with pattern match on function args:**
+
+```elixir
+def toggle(%User{role: role} = user, role) do
+  # role argument pinned against the struct field — matches only when they agree
+  {:ok, user}
+end
+
+def toggle(_user, _), do: {:error, :role_mismatch}
+```
+
+### String prefix matching with `<>`
+
+`<>` in a pattern matches a **prefix** (not suffix, not middle):
+
+```elixir
+# Extract token after "Bearer " prefix
+case header do
+  "Bearer " <> token -> {:ok, token}
+  _ -> {:error, :invalid_auth}
+end
+
+# Parse command-like strings
+def handle_command("/quit" <> _rest), do: :quit
+def handle_command("/join " <> channel), do: {:join, channel}
+def handle_command("/msg " <> rest) do
+  [user, message] = String.split(rest, " ", parts: 2)
+  {:msg, user, message}
+end
+def handle_command(text), do: {:say, text}
+
+# Multi-level dispatch on prefixes
+def route("api/v1/" <> path), do: v1_route(path)
+def route("api/v2/" <> path), do: v2_route(path)
+```
+
+**Constraint:** the LHS of `<>` must be a **literal** string. `prefix <> rest` where `prefix` is a variable does not work for pattern matching.
+
+```elixir
+# BAD — doesn't compile; prefix must be literal
+def strip(prefix <> rest, prefix), do: rest
+
+# GOOD
+def strip(str, prefix) do
+  if String.starts_with?(str, prefix) do
+    String.replace_prefix(str, prefix, "")
+  else
+    str
+  end
+end
+```
+
+**Suffix matching:** `<>` cannot match suffixes. Use `String.ends_with?/2`:
+
+```elixir
+if String.ends_with?(filename, ".ex"), do: compile(filename)
+```
+
+### Default arguments with multi-clause — header clause
+
+When combining default arguments (`\\`) with multiple function clauses, define a **header** that lists the defaults:
+
+```elixir
+# Header — defines defaults ONCE; no body
+def fetch(url, opts \\ [])
+
+# Clauses follow, without repeating defaults
+def fetch(url, []), do: fetch_default(url)
+def fetch(url, opts) when is_list(opts), do: fetch_with_opts(url, opts)
+```
+
+**Why a header is required:** Elixir forbids repeating defaults in multiple clauses — it would be ambiguous which clause's defaults apply when the caller omits args.
+
+```elixir
+# BAD — won't compile: defaults in multiple clauses
+def fetch(url, opts \\ []), do: ...
+def fetch(url, opts \\ [], headers), do: ...   # error
+
+# GOOD
+def fetch(url, opts \\ [], headers \\ [])
+def fetch(url, opts, []), do: fetch_basic(url, opts)
+def fetch(url, opts, headers), do: fetch_with_headers(url, opts, headers)
+```
+
+**Guidance:** use the header when you have 2+ clauses; use inline defaults (`def f(x, opts \\ [])`) for single-clause functions.
+
+### Assertive pattern matching — let it crash
+
+When you expect a value to have a specific shape, **pattern match to assert it**. Don't extract defensively — let a `MatchError` surface the real problem.
+
+```elixir
+# BAD — defensive; hides malformed input, returns wrong value
+def process(response) do
+  body = Map.get(response, :body, nil)
+  status = Map.get(response, :status, 0)
+  # If status is 0, is that a real response or a missing key?
+  handle(status, body)
+end
+```
+
+```elixir
+# GOOD — assertive: response MUST have status and body; crash on violation
+def process(%{status: status, body: body}) do
+  handle(status, body)
+end
+```
+
+**When to assert vs extract:**
+
+| Situation | Strategy |
+|---|---|
+| Internal data you built (structs, validated inputs) | Assertive — pattern match; crash on violation |
+| External input (user params, HTTP bodies, DB rows with unknown shape) | Validate at boundary with changeset/case; extract safely |
+| Optional fields | Explicit: `Map.get(m, :k, default)` or match `%{}` |
+| Required fields | Assertive: `%{k: v} = m` |
+
+**Real-world pattern:** Phoenix controllers receive `%Plug.Conn{} = conn`, not `Map.get(conn, :assigns)`. Ecto changesets destructure as `%Changeset{valid?: true, changes: changes} = cs`. Assertive destructuring surfaces bugs early.
+
 ---
 
 ## Guards
