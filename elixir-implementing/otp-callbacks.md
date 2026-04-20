@@ -774,6 +774,93 @@ File.stream!("big.txt")
 
 ---
 
+## Rate Limiter — Token Bucket with ETS + :atomics
+
+A production-grade rate limiter uses ETS for per-key state and `:atomics` for lock-free counters. Faster than a GenServer for the hot path (writes don't serialize through a mailbox); a small GenServer handles refill.
+
+```elixir
+defmodule MyApp.RateLimit do
+  @moduledoc """
+  Token bucket rate limiter. Each `key` has a bucket of `burst` tokens
+  that refills at `refill_per_sec` per second.
+  """
+  use GenServer
+
+  @table :my_app_rate_limit
+
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @doc """
+  Attempts to consume one token for `key`. Returns :ok or {:error, :rate_limited}.
+  No message-passing on the hot path — direct ETS ops only.
+  """
+  def check(key, burst, refill_per_sec) do
+    now = System.monotonic_time(:millisecond)
+
+    case :ets.lookup(@table, key) do
+      [] ->
+        # First use — insert bucket with burst - 1 tokens
+        :ets.insert_new(@table, {key, burst - 1, now, burst, refill_per_sec})
+        :ok
+
+      [{^key, tokens, last_refill, burst_cfg, rate}] ->
+        elapsed_ms = now - last_refill
+        refilled = tokens + div(elapsed_ms * rate, 1_000)
+        tokens_now = min(burst_cfg, refilled)
+
+        if tokens_now >= 1 do
+          # Decrement atomically; race-safe via update_counter
+          new_count = :ets.update_counter(@table, key,
+            [{2, -1, 0, 0}],       # clamp at 0
+            {key, tokens_now, now, burst_cfg, rate}
+          )
+          if new_count >= 0, do: :ok, else: {:error, :rate_limited}
+        else
+          {:error, :rate_limited}
+        end
+    end
+  end
+
+  # ── Server ─────────────────────────────────────────────────────
+
+  @impl true
+  def init(_opts) do
+    :ets.new(@table, [
+      :set, :named_table, :public,
+      read_concurrency: true, write_concurrency: true,
+      decentralized_counters: true
+    ])
+    {:ok, %{}}
+  end
+
+  @impl true
+  def handle_info(_msg, state), do: {:noreply, state}
+end
+```
+
+**Usage:**
+
+```elixir
+# Allow 10 requests per second, burst of 30
+case MyApp.RateLimit.check("user:42", 30, 10) do
+  :ok -> process_request()
+  {:error, :rate_limited} -> {:error, :too_many_requests}
+end
+```
+
+### Variants
+
+| Need | Approach |
+|---|---|
+| Cluster-wide rate limit | [Hammer](https://hex.pm/packages/hammer) with Mnesia / Redis backend |
+| Per-endpoint HTTP rate limit | Plug wrapper around this GenServer + Plug.Conn response |
+| Sliding window (not token bucket) | Fixed-size ring buffer in ETS with `:ets.select_count` |
+| Simpler single-token ops | `:counters` + periodic reset — drop the refill logic |
+
+Start with this template for single-node; move to Hammer when distribution is needed.
+
+---
+
 ## Common Anti-Patterns (BAD / GOOD)
 
 ### 1. Blocking `init/1`

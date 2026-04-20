@@ -337,6 +337,169 @@ end
 
 Protocols dispatch on data type. Behaviours dispatch on module identity chosen at config time. For external adapters (you want to swap at runtime/config-time based on environment), use a behaviour. Use a protocol when you want different data types to share an interface (Enumerable, Jason.Encoder).
 
+See §4.7 below for the full decision framework.
+
+### 4.7 Behaviour vs Protocol — the polymorphism decision
+
+These are Elixir's two polymorphism mechanisms. Getting this choice right shapes the architecture.
+
+**The fundamental difference:**
+
+| Mechanism | Dispatches on | Swapped by | Example |
+|---|---|---|---|
+| **Behaviour** | The **module** the caller invokes | Config, explicit argument, compile-time constant | `Plug`, `GenServer`, `MyApp.Storage` → `Redis` or `Mock` |
+| **Protocol** | The **data type** of the first argument | Adding a `defimpl` for a new type | `Enumerable`, `Jason.Encoder`, `String.Chars` |
+
+**Decision table — which to use?**
+
+| When you need to… | Use | Why |
+|---|---|---|
+| Swap implementation per environment (real vs test) | **Behaviour** | Config chooses the module; Mox generates a test double |
+| Plug in different strategies by config (SMTP vs SendGrid vs test) | **Behaviour** | The strategy IS a module, not data |
+| Allow multiple data types to share a method (`render/1`, `encode/1`, `to_string/1`) | **Protocol** | Dispatch comes from the value's type, not a config flag |
+| Extend a framework (implement GenServer/Plug/Supervisor) | **Behaviour** | Framework defines the contract; you provide the module |
+| Add support for a new type to an existing API you don't own | **Protocol** | You can `defimpl Jason.Encoder, for: MyStruct` without touching Jason |
+| Separate ports from adapters (hexagonal) | **Behaviour** | Port = behaviour, adapter = module implementing it |
+| Offer derived defaults via `@derive` on user structs | **Protocol** | `@derive` is protocol-only |
+| Need compile-time checks that all impls exist | **Behaviour** | `@impl true` + missing-callback warnings |
+| Need runtime-pluggable behaviour per entity (not per env) | **Protocol on struct** (see below) | Each struct carries its own implementation |
+| Dispatch across many types with **no** sensible default | **Protocol without fallback** | Enumerable, Collectable — fail loudly on non-implementers |
+| Single implementation today, "in case" abstraction | **Neither** — plain module | Add the behaviour only when a second impl exists |
+
+**"Plain module" is the default.** Introducing either polymorphism mechanism has costs (cognitive, performance consolidation, test fixtures). Introduce when a real second implementation or test double exists — not "just in case".
+
+### 4.8 Protocol-on-struct — strategy/plugin dispatch (AshAuthentication pattern)
+
+When you want runtime-pluggable behaviour per entity (not per environment), neither plain behaviour nor plain protocol fits cleanly. The pattern:
+
+1. Each strategy is a **struct**.
+2. A **protocol** is implemented for each strategy struct.
+3. Dispatch happens on the struct — the caller just has a `%Strategy{}` value; the protocol handles the rest.
+
+```elixir
+# Define the protocol — the dispatch surface
+defprotocol MyApp.AuthStrategy do
+  @spec authenticate(t(), credentials :: map()) :: {:ok, user()} | {:error, term()}
+  def authenticate(strategy, credentials)
+
+  @spec name(t()) :: String.t()
+  def name(strategy)
+end
+
+# Each strategy is a struct
+defmodule MyApp.Strategies.Password do
+  defstruct [:hash_algorithm, :min_length]
+
+  defimpl MyApp.AuthStrategy do
+    def name(_), do: "Password"
+    def authenticate(%{hash_algorithm: alg}, %{email: e, password: p}), do: ...
+  end
+end
+
+defmodule MyApp.Strategies.Oauth do
+  defstruct [:provider, :client_id, :client_secret]
+
+  defimpl MyApp.AuthStrategy do
+    def name(%{provider: p}), do: "OAuth (#{p})"
+    def authenticate(%{provider: p}, %{code: code}), do: ...
+  end
+end
+
+# Config holds strategy structs — which are swapped freely at runtime
+config :my_app, :auth_strategies, [
+  %MyApp.Strategies.Password{hash_algorithm: :argon2, min_length: 12},
+  %MyApp.Strategies.Oauth{provider: :github, client_id: "...", client_secret: "..."}
+]
+
+# Usage — dispatch on the strategy value, not a module atom
+for strategy <- Application.fetch_env!(:my_app, :auth_strategies) do
+  case MyApp.AuthStrategy.authenticate(strategy, creds) do
+    {:ok, user} -> user
+    {:error, _} -> nil
+  end
+end
+```
+
+**Why this beats plain behaviour:** strategies can be configured with state (hash algorithm, OAuth credentials) that travels with the dispatch. You don't need a separate registry of "which module implements which OAuth provider with what config." The struct carries both identity and configuration.
+
+**Why this beats plain protocol:** the protocol is explicitly designed as an extension point — new strategies add a struct + defimpl, no need to modify existing code.
+
+**When to reach for this:**
+- Ash extension system (authentication strategies, notifiers, policies).
+- Plugin architectures where users ship their own extensions as structs with `defimpl`.
+- Per-tenant / per-feature-flag pluggable behaviour.
+- Any case where a **value-object** IS the strategy (not just a module name).
+
+### 4.9 Behaviour design — defining the contract
+
+When designing a behaviour, resist the urge to copy the full surface of the underlying library. The behaviour should express what the **domain** needs, not what the library provides.
+
+**Guidelines:**
+
+1. **Narrow the surface.** If the domain only needs `put/get/delete`, don't include `keys/0`, `incr/2`, `expire/2`, etc. Extend later.
+2. **Return domain types, not library types.** Translate `%Stripe.Charge{}` to `%Payment{}` at the adapter boundary, not at every call site.
+3. **Use `@optional_callbacks` sparingly.** Each optional callback is a `function_exported?` check at the call site — the flow control becomes implicit.
+4. **Version via new modules, not new callbacks.** Adding a required callback to an existing behaviour breaks all implementors. Prefer `MyApp.Storage.V2` as a new behaviour, OR make the new callback optional.
+5. **Don't leak transport concerns.** The behaviour describes what, not how. If the interface mentions `:http_status`, it's too close to HTTP.
+
+**Example — good behaviour design:**
+
+```elixir
+defmodule MyApp.PaymentGateway do
+  @moduledoc """
+  Minimal contract for charging customers. Adapters translate
+  gateway-specific errors to domain errors.
+  """
+
+  @type amount :: pos_integer()        # cents
+  @type currency :: :usd | :eur | :gbp
+  @type customer_id :: String.t()
+
+  @type charge :: %{
+          id: String.t(),
+          amount: amount(),
+          currency: currency(),
+          status: :succeeded | :pending | :failed
+        }
+
+  @type error ::
+          :insufficient_funds
+          | :card_declined
+          | :invalid_customer
+          | {:gateway_error, term()}
+
+  @callback charge(customer_id(), amount(), currency()) :: {:ok, charge()} | {:error, error()}
+  @callback refund(charge_id :: String.t()) :: :ok | {:error, error()}
+end
+```
+
+**This contract is domain-shaped:** amounts in cents, enumerated currencies, bounded error set. An adapter for Stripe or Adyen translates gateway-specific details into this shape.
+
+### 4.10 Contract evolution
+
+When a behaviour is in use, adding callbacks is a breaking change. Strategies:
+
+| Change | Breaking? | How to evolve |
+|---|---|---|
+| Add a required `@callback` | Yes | Make it `@optional_callbacks` first; migrate implementors; then make required |
+| Remove a `@callback` | Yes | Stop calling it; deprecate; remove in the next major |
+| Change an arg type | Yes | Add a new callback with the new signature; deprecate the old |
+| Add a new behaviour (superset) | No | Create `MyApp.Storage.V2`; route calls |
+| Add `@optional_callbacks` | No | Existing implementors don't need to act |
+
+**`@deprecated` attributes** in the behaviour module are picked up by Dialyzer and docs tooling.
+
+### 4.11 "Behaviour spam" — when NOT to create a behaviour
+
+Symptoms that a behaviour is premature:
+
+- Only one implementation exists and no test double is planned.
+- The behaviour's surface is a 1-to-1 copy of one library's API.
+- You introduced a behaviour to "enable testing" but the tests mock your own module (see `../elixir-reviewing/anti-patterns-catalog.md` E3).
+- Every parameter is `any()` because the behaviour doesn't actually narrow the interface.
+
+**Replace with a plain module** until you have a second real implementation or a clear test-double use case.
+
 ### 4.6 Migration path — retrofitting hexagonal
 
 If you have an existing codebase with direct Stripe calls in your domain, here's the migration:

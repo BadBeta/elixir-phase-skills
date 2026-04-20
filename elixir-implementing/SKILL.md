@@ -40,6 +40,7 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 | [type-and-docs.md](type-and-docs.md) | `@spec`, `@type`, `@doc`, `@moduledoc`, doctests, Dialyzer config, built-in types, **`binary`/`String.t`/`iodata` decision**, **closed vs open map types**, **`dynamic()` gradual typing** | Adding types and documentation |
 | [networking-patterns.md](networking-patterns.md) | `:gen_tcp`/`:gen_udp` templates, acceptor loops, protocol framing (length-prefix, line, TLV), Ranch/Thousand Island handlers, TLS, HTTP clients | TCP/UDP/HTTP code |
 | [code-style.md](code-style.md) | `.formatter.exs` template, Credo check catalog, module organization, function ordering, sigil selection, `defdelegate` decision, readable-code patterns, style BAD/GOOD | Any Elixir code — ensures style-compliant output |
+| [production-patterns.md](production-patterns.md) | Production Phoenix patterns (schema base, kit modules, response cache, policy, controller context injection, HTTP SSL fallback, Oban telemetry reporter), NimbleOptions, Mix custom tasks & quality aliases, library authoring conventions | Writing production-ready app code or publishing a library to Hex |
 
 **For architecture-level decisions** (which constructs/processes/contexts to use BEFORE writing code), load `elixir-planning`. **For critique of existing code**, load `elixir-reviewing`.
 

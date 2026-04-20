@@ -727,6 +727,195 @@ See `../elixir-planning/test-strategy.md` for the choice.
 
 ---
 
+## Parametrized Tests (Elixir 1.18+)
+
+Run the same test body with multiple parameter sets without copy-paste. `parameterize/1` is evaluated at compile time.
+
+```elixir
+defmodule MyApp.ParserTest do
+  use ExUnit.Case, async: true
+
+  describe "parse/1" do
+    parameterize([
+      %{input: "42", expected: {:ok, 42}},
+      %{input: "0", expected: {:ok, 0}},
+      %{input: "-1", expected: {:ok, -1}},
+      %{input: "abc", expected: {:error, :invalid}},
+      %{input: "", expected: {:error, :empty}}
+    ])
+
+    test "parses input", %{input: input, expected: expected} do
+      assert MyApp.Parser.parse(input) == expected
+    end
+  end
+end
+```
+
+ExUnit runs one test per parameter row, with a descriptive name derived from the parameters.
+
+**Alternative (pre-1.18):**
+
+```elixir
+# Works in any Elixir version — uses for-comprehension to generate tests
+for {input, expected} <- [
+      {"42", {:ok, 42}},
+      {"abc", {:error, :invalid}}
+    ] do
+  @tag input: input, expected: expected
+  test "parses #{input}", %{input: input, expected: expected} do
+    assert MyApp.Parser.parse(input) == expected
+  end
+end
+```
+
+Use parametrized tests for:
+- Boundary/edge-case tables.
+- Cross-provider tests (same behaviour, different backends).
+- Cross-locale / cross-region tests.
+
+---
+
+## ExVCR — Recording & Replaying HTTP
+
+Use when you MUST hit a real external API at least once (integration test) but want reproducible test runs after.
+
+```elixir
+# test/test_helper.exs
+ExUnit.start()
+HTTPoison.start()
+
+# In a test
+defmodule MyApp.GitHubTest do
+  use ExUnit.Case, async: false   # ExVCR uses a global cassette file
+  use ExVCR.Mock, adapter: ExVCR.Adapter.Hackney
+
+  setup do
+    ExVCR.Config.cassette_library_dir("test/fixtures/cassettes")
+    :ok
+  end
+
+  test "fetches repo stars" do
+    use_cassette "github_stars" do
+      assert {:ok, %{stars: n}} = MyApp.GitHub.get_stars("elixir-lang/elixir")
+      assert n > 0
+    end
+  end
+end
+```
+
+**Workflow:**
+1. First run — ExVCR records the HTTP exchange to `test/fixtures/cassettes/github_stars.json`.
+2. Subsequent runs — ExVCR replays from the cassette; no network.
+3. Commit cassettes to git so CI is reproducible.
+
+**When to re-record:** when the API changes or you want fresh data. Delete the cassette file and re-run. Store as fixture data; review changes in PR.
+
+**Redacting secrets in cassettes:**
+
+```elixir
+ExVCR.Config.filter_request_headers(["Authorization"])
+ExVCR.Config.filter_sensitive_data("token=[A-Z0-9]+", "token=***")
+```
+
+**When NOT to use:** for your own code's HTTP boundary (use Mox on a behaviour — see §Mox above). ExVCR is for when you want to actually verify the integration works end-to-end.
+
+---
+
+## Wallaby — Browser / End-to-End Tests
+
+Use when you need to verify JavaScript-dependent flows, full-stack interactions, or accessibility. Wallaby drives a real (headless) Chrome via Selenium.
+
+### Setup
+
+```elixir
+# mix.exs
+{:wallaby, "~> 0.30", runtime: false, only: :test}
+
+# test/test_helper.exs
+{:ok, _} = Application.ensure_all_started(:wallaby)
+
+# config/test.exs
+config :my_app, MyAppWeb.Endpoint,
+  http: [port: 4002],
+  server: true                    # must run the server during tests
+
+config :wallaby,
+  otp_app: :my_app,
+  chromedriver: [headless: true]
+
+# test/support/feature_case.ex
+defmodule MyAppWeb.FeatureCase do
+  use ExUnit.CaseTemplate
+
+  using do
+    quote do
+      use Wallaby.Feature
+      import Wallaby.Query
+      alias MyApp.{AccountsFixtures}
+    end
+  end
+
+  setup tags do
+    pid = Ecto.Adapters.SQL.Sandbox.start_owner!(MyApp.Repo, shared: not tags[:async])
+    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+    :ok
+  end
+end
+```
+
+### A feature test
+
+```elixir
+defmodule MyAppWeb.LoginFeatureTest do
+  use MyAppWeb.FeatureCase, async: true
+
+  feature "user logs in and sees dashboard", %{session: session} do
+    user = AccountsFixtures.user_fixture(%{email: "alice@example.com"})
+
+    session
+    |> visit("/login")
+    |> fill_in(text_field("Email"), with: user.email)
+    |> fill_in(text_field("Password"), with: "super-secret")
+    |> click(button("Log in"))
+    |> assert_has(css(".flash-info", text: "Welcome back"))
+    |> assert_has(css("[data-test='dashboard']"))
+  end
+end
+```
+
+**Key query functions:**
+- `css(selector)` — CSS selector, optionally with `text:` constraint
+- `text_field("Email")` — locate input by label
+- `button("Log in")` — locate button by label
+- `link("Profile")` — locate link by text
+
+**Actions:** `visit`, `click`, `fill_in`, `clear`, `execute_script`, `take_screenshot`.
+
+**Assertions:** `assert_has`, `refute_has`, `assert_text`, `has?`.
+
+### When to use Wallaby
+
+| Scenario | Wallaby? |
+|---|---|
+| Happy-path user journey | Yes — one feature per key flow |
+| Javascript interaction (Alpine, Stimulus, custom JS) | Yes |
+| LiveView specific behaviour | Prefer `Phoenix.LiveViewTest` (faster, no browser) |
+| Visual regression | No — separate tool (Percy, Chromatic) |
+| Every form field validation | No — controller/LiveView tests (faster) |
+
+**Keep feature tests to a small number** (5–20 for a typical app). Each one is expensive; they're for catching integration regressions, not exhaustive validation.
+
+### Screenshots on failure
+
+```elixir
+# test/test_helper.exs
+Wallaby.screenshot_on_failure()
+```
+
+Screenshots land in `screenshots/` — useful for CI artifact upload.
+
+---
+
 ## Common Anti-Patterns (BAD / GOOD)
 
 ### 1. `Process.sleep` waiting for async work

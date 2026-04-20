@@ -47,6 +47,7 @@ This SKILL.md covers the decision tables and quick-reference material. For depth
 | [test-strategy.md](test-strategy.md) | Test pyramid, mock boundaries, factory architecture, async isolation design, CI strategy, contract tests | Planning test infrastructure at project start; fixing slow/flaky suites |
 | [networking-design.md](networking-design.md) | TCP/UDP server architecture, active vs passive mode, protocol framing, connection supervision, TLS placement | Designing a network server or protocol |
 | [growing-evolution.md](growing-evolution.md) | Stage 1→2→3 evolution, refactoring decision tree, when to split / merge / escalate mechanisms | Growing an existing app; deciding whether a refactor is needed |
+| [distributed-elixir.md](distributed-elixir.md) | Multi-node design — cross-node communication (`:erpc`, `:pg`), distributed registries (Horde, `:global`), state distribution (owner/replicated/sharded), partition handling, libcluster topology, distribution anti-patterns | Designing multi-node / clustered / multi-region deployments |
 
 **Cross-references:** subskills link to each other and to the other main skills' subskills (when they exist) via relative paths.
 

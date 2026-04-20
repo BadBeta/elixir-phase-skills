@@ -13,6 +13,35 @@ Phase-focused deep reference for supervision tree design and process architectur
 
 ---
 
+## 0. The Actor Model in BEAM — quick conceptual orientation
+
+If you're coming from a thread/shared-memory world, the mental model matters. The BEAM's **actor model** has five properties that drive every process-topology decision:
+
+| Property | What it means | Consequence for design |
+|---|---|---|
+| **Isolated state** | Each process has its own heap, own GC | No locks, no mutexes, no shared-data race conditions |
+| **Message passing** | Processes communicate only by messages (async `send` or sync `GenServer.call`) | Inter-process data is **copied** (immutable by design) |
+| **Shared nothing** | No shared memory between processes | Scales linearly across cores; GC is per-process, never stop-the-world |
+| **Location transparent** | `send(pid, msg)` works identically for local and remote PIDs | Distribution is a configuration choice, not a code change |
+| **Fail independently** | One process crash doesn't affect others | Supervision handles recovery; unrelated workers keep running |
+
+**Message-passing semantics you must design around:**
+
+| Guarantee | What it means | Implication |
+|---|---|---|
+| **At-most-once delivery** | A message is delivered zero or one times (default) | Messages can be lost if the receiver crashes before processing → idempotency matters |
+| **Per-sender order** | Messages from A to B arrive in send order | But A→B and C→B may interleave |
+| **No exactly-once** | BEAM provides no built-in exactly-once | Application handles via idempotency keys |
+| **`call` vs `cast`** | `call` blocks until reply or exit; `cast` is fire-and-forget | Use `call` when you need the outcome; `cast` only when loss is acceptable |
+
+**The single most important rule this drives:** across node boundaries, ALWAYS use `call` (with a sensible timeout and `catch :exit`). Network partitions make `cast` silently unreliable — the message disappears without a trace.
+
+**Design implication — "processes for isolation, modules for thought":** processes are a runtime tool (fault isolation, parallelism, lifecycle management). They are not the unit of code organization. A domain "User" is a module (plus maybe an Ecto schema), not a process-per-user — unless *users have in-memory runtime state that must survive concurrent access*.
+
+See `../elixir-implementing/otp-callbacks.md` for the implementation side. The rest of this document takes the actor model as given and focuses on how to shape a supervision tree.
+
+---
+
 ## 1. Rules for designing process topology (LLM)
 
 1. **ALWAYS draw the supervision tree before writing code.** The tree IS the architecture. If you can't draw it, you can't build it.

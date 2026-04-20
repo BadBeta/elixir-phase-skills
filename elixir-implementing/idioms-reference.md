@@ -611,6 +611,145 @@ items
 |> handle_count()
 ```
 
+### `with_index` — pair each element with its position
+
+```elixir
+Enum.with_index(["a", "b", "c"])          # [{"a", 0}, {"b", 1}, {"c", 2}]
+Enum.with_index(["a", "b"], 1)            # [{"a", 1}, {"b", 2}]  (offset)
+
+# Common pattern — render list with row numbers
+for {item, idx} <- Enum.with_index(items), do: "#{idx + 1}. #{item.name}"
+
+# Transforming form
+Enum.with_index(list, fn x, i -> {i, transform(x)} end)
+```
+
+### Deduplication — `uniq`, `uniq_by`, `dedup`, `dedup_by`
+
+**Uniq** removes duplicates from the whole collection (O(n) via a MapSet under the hood).
+**Dedup** only collapses **consecutive** duplicates — cheap O(n), no hashing.
+
+```elixir
+Enum.uniq([1, 2, 1, 3, 2])                # [1, 2, 3]         — global
+Enum.uniq_by(users, & &1.email)           # one per email     — global by key
+
+Enum.dedup([1, 1, 2, 2, 2, 1, 3])         # [1, 2, 1, 3]      — consecutive only
+Enum.dedup_by(events, & &1.type)           # collapse runs of same type
+```
+
+**When:** use `uniq` when order of first occurrence matters and the collection is small. Use `dedup` for sorted data or streaming where only run-length matters.
+
+### Min / Max / Sum — with keys and comparators
+
+```elixir
+Enum.min(list)                            # smallest element
+Enum.max(list)                            # largest
+Enum.sum(list)                            # shortcut for Enum.reduce(list, 0, &+/2)
+Enum.product(list)                        # multiplicative
+
+Enum.min_by(users, & &1.age)              # user with min :age
+Enum.max_by(events, & &1.priority, fn a, b -> a >= b end)  # custom comparator
+Enum.min_max(list)                        # {min, max} in one pass
+Enum.min_max_by(list, & &1.score)         # {min_user, max_user}
+```
+
+### `take_while` / `drop_while` / `take_every` — partial prefixes
+
+Process only the leading run that satisfies a predicate:
+
+```elixir
+# Take events until the first shutdown
+Enum.take_while(events, fn e -> e.type != :shutdown end)
+
+# Skip header lines, process the rest
+lines |> Enum.drop_while(&String.starts_with?(&1, "#")) |> parse_body()
+
+# Every third element (sampling)
+Enum.take_every(1..100, 10)               # [1, 11, 21, 31, 41, ...]
+```
+
+### `chunk_by` / `chunk_while` — run-based grouping
+
+```elixir
+# Group consecutive elements by a key
+Enum.chunk_by([1, 1, 2, 3, 3, 3], & &1)
+# [[1, 1], [2], [3, 3, 3]]
+
+Enum.chunk_by(events, & &1.session_id)
+# Each list is a contiguous run of events from the same session
+```
+
+`chunk_while/4` is the general-purpose stateful chunker — use when `chunk_by` isn't expressive enough:
+
+```elixir
+# Group numbers into chunks that sum to <= 10
+Enum.chunk_while([1, 2, 3, 5, 4, 6, 2], 0,
+  fn n, acc when acc + n <= 10 -> {:cont, [n | chunk_state(acc, n)], acc + n}
+     n, acc -> {:cont, Enum.reverse(acc_to_list(acc)), n}
+  end,
+  fn acc -> {:cont, Enum.reverse(acc_to_list(acc)), 0} end)
+```
+
+Less commonly needed than `chunk_every`/`chunk_by` — reach for `chunk_while` only for custom grouping logic.
+
+### `find_index`, `find_value`, `reject`
+
+```elixir
+Enum.find_index(list, &(&1 > 100))       # position of first match, or nil
+Enum.find_value(list, fn u -> u.email && String.downcase(u.email) end)
+# Returns the first truthy transformed value — handy for "search + transform"
+
+Enum.reject(list, & &1.archived?)        # inverse of filter
+```
+
+### `map_intersperse` / `map_join` — build strings in one pass
+
+```elixir
+# Transform + join in one pass (avoids intermediate list)
+users |> Enum.map_join(", ", & &1.name)
+# "Alice, Bob, Charlie"
+
+# Transform + intersperse (produces a list — useful for IO lists)
+users |> Enum.map_intersperse("; ", & &1.name)
+# ["Alice", "; ", "Bob", "; ", "Charlie"]   (returns iolist-compatible form)
+```
+
+### `zip_reduce` — fold across multiple enumerables
+
+```elixir
+# Sum two columns pair-wise
+Enum.zip_reduce([1, 2, 3], [10, 20, 30], 0, fn a, b, acc -> acc + a * b end)
+# 140  (= 1*10 + 2*20 + 3*30)
+
+# Variable arity via list-of-enumerables
+Enum.zip_reduce([[1, 2], [3, 4], [5, 6]], [], fn row, acc -> [Enum.sum(row) | acc] end)
+# [11, 7, 3]
+```
+
+### `slice` / `at`
+
+```elixir
+Enum.at(list, 5)                          # element at index, or nil
+Enum.at(list, 5, :none)                   # with default
+Enum.slice(list, 2, 3)                    # 3 elements from index 2
+Enum.slice(list, 2..4)                    # range slice
+```
+
+**Caveat:** `Enum.at/2` and `Enum.slice/2,3` on a list are O(n). For random access, use a tuple (`elem/2`) or map keyed by index.
+
+### Reference — remaining common Enum functions
+
+| Function | Purpose |
+|---|---|
+| `Enum.concat/1,2` | Flatten list-of-lists, or append two enumerables |
+| `Enum.count/1,2` | Total count or count matching predicate |
+| `Enum.empty?/1` | O(1) — preferred over `length(x) == 0` |
+| `Enum.random/1`, `Enum.take_random/2` | Random picks |
+| `Enum.shuffle/1` | Shuffle |
+| `Enum.drop/2`, `Enum.take/2` | Drop/take N |
+| `Enum.reverse/1,2` | Reverse (with tail) |
+| `Enum.member?/2` | Membership check (O(n) for lists; O(log n) for MapSet) |
+
 ---
 
 ## `Stream` — Lazy Sequences
@@ -649,6 +788,181 @@ File.stream!("big.csv")
 ```
 
 **Use `Stream.run/1`** when only side effects matter (no result value).
+
+### `Stream.transform/3,4,5` — stateful transformations
+
+The Stream equivalent of `Enum.flat_map_reduce/3` + cleanup. Use when you need to emit 0..N outputs per input while threading state (parsers, chunkers, session builders).
+
+```elixir
+# Group lines into records separated by blank lines
+File.stream!("events.log")
+|> Stream.transform([], fn
+  "", buffer -> {[Enum.reverse(buffer)], []}    # blank line flushes buffer
+  line, buffer -> {[], [line | buffer]}         # accumulate non-blank
+end)
+|> Enum.to_list()
+
+# With init + after (5-arity form, Elixir 1.16+) — opens and closes a resource
+Stream.transform(
+  0..9,
+  fn -> File.open!("/tmp/log", [:write]) end,   # start
+  fn i, fh -> IO.puts(fh, "tick #{i}"); {[i], fh} end,  # transform
+  fn _fh -> :ok end,                             # last (before close)
+  fn fh -> File.close(fh) end                    # after — cleanup
+)
+```
+
+### `Stream.resource/3` — open / read / close pattern
+
+For wrapping a resource (file handle, socket, DB cursor) as a stream with guaranteed cleanup:
+
+```elixir
+def stream_lines(path) do
+  Stream.resource(
+    fn -> File.open!(path, [:read]) end,          # start — returns accumulator
+    fn fh ->
+      case IO.read(fh, :line) do
+        :eof -> {:halt, fh}                        # signal end → `after` runs
+        line -> {[line], fh}                       # emit one line
+      end
+    end,
+    fn fh -> File.close(fh) end                    # after — always runs
+  )
+end
+
+stream_lines("huge.log") |> Stream.take(100) |> Enum.to_list()
+# Only reads first 100 lines; close is still called
+```
+
+**Key guarantee:** the `after` callback runs even if the consumer calls `take/take_while` (terminating early), making `Stream.resource/3` safe for file descriptors, DB cursors, and sockets.
+
+### `Stream.flat_map` / `Stream.concat` / `Stream.zip`
+
+```elixir
+# Lazy flat_map — preserves laziness through expansion
+files |> Stream.flat_map(&File.stream!/1) |> Stream.take(1000)
+
+# Concatenate lazy streams
+Stream.concat([a_stream, b_stream, c_stream])
+
+# Zip with a lazy source of timestamps
+events |> Stream.zip(Stream.iterate(System.monotonic_time(), &(&1 + 1_000)))
+```
+
+### `Stream.take_while` / `Stream.drop_while` / `Stream.dedup`
+
+```elixir
+# Consume until a condition becomes false
+logs |> Stream.take_while(&(&1.level != :fatal)) |> Enum.to_list()
+
+# Skip heading noise, then stream the body
+Stream.drop_while(lines, &String.starts_with?(&1, "#"))
+
+# Lazy dedup of adjacent duplicates (think: running log of state changes)
+state_events |> Stream.dedup_by(& &1.kind) |> Enum.take(10)
+```
+
+### Building your own stream — full walkthrough
+
+When a data source isn't already a stream (external API paging, DB cursor, custom file format), wrap it in `Stream.resource/3`.
+
+**Pattern: paginated HTTP API as a stream**
+
+```elixir
+defmodule MyApp.Pager do
+  @doc """
+  Returns a Stream of all items across all pages.
+  Consumer controls how much to pull.
+  """
+  def stream(base_url) do
+    Stream.resource(
+      # start — no fetch yet, just the initial cursor
+      fn -> {base_url, nil} end,
+
+      # each call pulls one page, emits its items, advances the cursor
+      fn
+        {_, :halt} ->
+          {:halt, :done}
+
+        {url, cursor} ->
+          params = if cursor, do: [cursor: cursor], else: []
+          {:ok, %{"items" => items, "next" => next}} = MyApp.HTTP.get(url, params: params)
+
+          case next do
+            nil -> {items, {url, :halt}}       # last page; flag halt next call
+            next_cursor -> {items, {url, next_cursor}}
+          end
+      end,
+
+      # after — cleanup. No resource held here, so :ok
+      fn _ -> :ok end
+    )
+  end
+end
+
+# Usage
+MyApp.Pager.stream("https://api.example.com/events")
+|> Stream.filter(& &1["type"] == "purchase")
+|> Stream.take(100)
+|> Enum.to_list()
+# Only fetches enough pages to produce 100 purchases; then HTTP stops.
+```
+
+**The three-argument contract:**
+
+- **`start_fun`** (0-arity) — acquire the resource, return the initial accumulator.
+- **`next_fun`** (1-arity) — given the accumulator, return `{elements, new_acc}` (emit) or `{:halt, acc}` (stop).
+- **`after_fun`** (1-arity) — cleanup. Always runs, even when the consumer terminates early.
+
+**Pattern: streaming a custom binary file format**
+
+```elixir
+def stream_records(path) do
+  Stream.resource(
+    fn -> File.open!(path, [:read, :binary]) end,
+    fn fh ->
+      case :file.read(fh, 4) do
+        :eof -> {:halt, fh}
+        {:ok, <<len::32>>} ->
+          {:ok, payload} = :file.read(fh, len)
+          {[payload], fh}
+      end
+    end,
+    fn fh -> File.close(fh) end
+  )
+end
+```
+
+**`Stream.unfold/2`** — simpler when there's no resource to acquire/release, just state to evolve:
+
+```elixir
+# Fibonacci
+Stream.unfold({0, 1}, fn {a, b} -> {a, {b, a + b}} end) |> Enum.take(10)
+
+# Exponential backoff sequence
+Stream.unfold(100, fn delay -> {delay, min(delay * 2, 30_000)} end) |> Enum.take(5)
+# [100, 200, 400, 800, 1600]
+```
+
+Use `Stream.unfold/2` when it's just state → state with no resource to close. Use `Stream.resource/3` when there's a handle that must be closed.
+
+### Enum vs Stream — decision table
+
+| Scenario | Use |
+|---|---|
+| Small to medium list, consume all of it | **Enum** (lower overhead, single pass per step) |
+| Chain 3+ transformations on a large list, consume most | **Enum** → **Stream** depending on memory profile — benchmark |
+| Source is infinite (generate until N satisfied) | **Stream** |
+| Only need first K results from a pipeline | **Stream** → `Enum.take(k)` (work stops at K) |
+| Source is I/O (file, socket, DB cursor) | **Stream** (`File.stream!`, `Stream.resource`) |
+| Need the full result anyway (e.g., sort, group_by, sum) | **Enum** (Stream must materialize to sort anyway) |
+| Pipeline of side effects, no return value | **Stream** + `Stream.run/1` |
+| Memory-constrained environment (Nerves, low-RAM) | **Stream** where possible |
+
+**Benchmark rule of thumb:** for a 10K-element list consumed fully with 3 chained operations, Stream is typically 2× **slower** than Enum due to wrapper overhead. Stream wins when:
+- You stop early (`take/take_while`).
+- The source is lazy/external (I/O).
+- Intermediate lists would exceed memory.
 
 ---
 
@@ -713,6 +1027,236 @@ for item <- items, uniq: true, do: item.category
 for <<r, g, b <- pixels>>, do: {r, g, b}
 # Iterates over a binary, 3 bytes at a time
 ```
+
+---
+
+## Recursion
+
+In Elixir, recursion is the third flow-control pillar alongside `Enum`/`Stream` and `for` comprehensions. Reach for it when:
+
+- **Early termination** with complex conditions (though `Enum.reduce_while/3` often suffices).
+- **Tree / graph traversal** (parent → children structures).
+- **Mutually recursive** grammars or state transitions.
+- **Custom enumeration** with non-trivial state (often paired with `Stream.resource/3`).
+- **Parsers / walkers** where each element affects what you do with the next.
+
+**When NOT to use:** for a simple map/filter/reduce, use `Enum`. A recursive function that's just re-implementing `Enum.map/2` is almost certainly wrong.
+
+### Tail-call optimization (TCO)
+
+A function call is **tail-recursive** when the recursive call is the *very last thing* a clause does — nothing wraps it, nothing uses its result other than returning it. The BEAM converts tail calls into jumps: **no new stack frame**, constant memory.
+
+**Tail-recursive — good:**
+
+```elixir
+def sum([], acc), do: acc
+def sum([h | t], acc), do: sum(t, acc + h)  # recursion is the last thing
+
+sum([1, 2, 3, 4], 0)  # runs in constant stack
+```
+
+The accumulator carries the partial result forward. There's no work left when `sum` returns.
+
+**Body-recursive — NOT tail-call optimized:**
+
+```elixir
+def sum([]), do: 0
+def sum([h | t]), do: h + sum(t)   # + wraps the recursive call
+
+# Each call allocates a stack frame until the base case —
+# then unwinds, computing h + (h + (h + ...))
+```
+
+Body recursion uses O(n) stack. For small N (< 100K) it's fine and often clearer. For unbounded / large input, **always** use tail recursion.
+
+**Key rule:** the recursive call must be in **tail position**. These are NOT tail positions:
+
+```elixir
+# NOT tail — arithmetic wraps the call
+def f([h | t]), do: h + f(t)
+
+# NOT tail — the call is an argument to another call
+def f([h | t]), do: IO.puts(f(t))
+
+# NOT tail — the call is inside a case/if branch that adds computation after
+def f([h | t]) do
+  case g(t) do
+    :ok -> :ok
+  end
+end
+# ↑ Actually this IS tail-call — the case's return is the function's return.
+
+# Tail position inside case/if
+def f([h | t]) do
+  if h > 0 do
+    f(t)                # TCO'd
+  else
+    []
+  end
+end
+```
+
+### The accumulator-reverse pattern
+
+Tail recursion builds results head-first (prepend — O(1)), then reverses at the end.
+
+```elixir
+def map([], _fun, acc), do: Enum.reverse(acc)
+def map([h | t], fun, acc), do: map(t, fun, [fun.(h) | acc])
+
+def map(list, fun), do: map(list, fun, [])    # public entry point
+```
+
+This is strictly O(n) with constant stack — same cost as `Enum.map/2` under the hood.
+
+**Why not append?** `acc ++ [x]` is O(length of acc) per step, giving O(n²) total. Always **prepend then reverse**.
+
+### Early termination with recursion
+
+```elixir
+# Search — halt at first match without traversing the rest
+def find([], _fun), do: nil
+def find([h | t], fun) do
+  if fun.(h), do: h, else: find(t, fun)
+end
+
+# Validate until first failure
+def validate_all([]), do: :ok
+def validate_all([h | t]) do
+  case validate(h) do
+    :ok -> validate_all(t)
+    {:error, reason} -> {:error, reason}
+  end
+end
+```
+
+`Enum.reduce_while/3` handles most of these cases; reach for explicit recursion when state is complex enough that `reduce_while` tuples become awkward.
+
+### Tree / graph traversal
+
+```elixir
+defmodule Tree do
+  defstruct [:value, children: []]
+
+  # Preorder depth-first — body-recursive (stack bounded by tree depth, usually fine)
+  def preorder(%Tree{value: v, children: cs}) do
+    [v | Enum.flat_map(cs, &preorder/1)]
+  end
+
+  # Depth-first with tail-recursion (explicit stack — for deep or adversarial trees)
+  def preorder_tco(tree), do: do_preorder([tree], [])
+
+  defp do_preorder([], acc), do: Enum.reverse(acc)
+  defp do_preorder([%Tree{value: v, children: cs} | rest], acc) do
+    do_preorder(cs ++ rest, [v | acc])
+  end
+end
+```
+
+For most trees, body recursion is fine — stack depth is bounded by tree depth (usually ≤ 50). Only rewrite to tail recursion when the tree can be pathologically deep.
+
+### Mutual recursion
+
+Two functions that call each other — works naturally, but each call breaks TCO if not in tail position:
+
+```elixir
+# Parse alternating identifiers and values
+def parse([], acc), do: Enum.reverse(acc)
+def parse([name | rest], acc) when is_atom(name), do: parse_value(rest, name, acc)
+
+def parse_value([value | rest], name, acc), do: parse(rest, [{name, value} | acc])
+```
+
+The compiler optimizes mutual tail calls too — the call chain doesn't grow the stack.
+
+### Recursion vs Enum.reduce_while — decision
+
+| Scenario | Use |
+|---|---|
+| Simple early-exit fold | `Enum.reduce_while/3` |
+| Non-list source (tree, graph, stream) | Explicit recursion |
+| Need to restructure the collection (parse, rewrite AST) | Explicit recursion |
+| Multi-pass (process list, then process the result) | Enum chain |
+| Accumulator is 2+ fields AND halt logic is complex | Explicit recursion — `reduce_while` tuples become unreadable |
+| You'd have to "lift" state into the accumulator awkwardly | Explicit recursion |
+
+### Common recursion anti-patterns
+
+**Appending in the accumulator:**
+
+```elixir
+# BAD — O(n²)
+def map_bad([], _fun, acc), do: acc
+def map_bad([h | t], fun, acc), do: map_bad(t, fun, acc ++ [fun.(h)])
+
+# GOOD — prepend + reverse
+def map_good([], _fun, acc), do: Enum.reverse(acc)
+def map_good([h | t], fun, acc), do: map_good(t, fun, [fun.(h) | acc])
+```
+
+**Body recursion on potentially unbounded input:**
+
+```elixir
+# BAD — stack overflow on long lists
+def sum([]), do: 0
+def sum([h | t]), do: h + sum(t)
+
+# GOOD — tail-recursive with accumulator
+def sum(list), do: sum(list, 0)
+defp sum([], acc), do: acc
+defp sum([h | t], acc), do: sum(t, h + acc)
+
+# BEST — just use Enum.sum
+```
+
+**Forgetting to reverse:**
+
+```elixir
+# BAD — results come out backward
+def reverse_evens([], acc), do: acc           # ← forgot Enum.reverse
+def reverse_evens([h | t], acc) when rem(h, 2) == 0,
+  do: reverse_evens(t, [h | acc])
+def reverse_evens([_ | t], acc), do: reverse_evens(t, acc)
+
+# GOOD
+def reverse_evens([], acc), do: Enum.reverse(acc)
+```
+
+**Rewriting Enum.map from scratch:**
+
+```elixir
+# BAD — reinventing the wheel
+def each_squared([], _acc), do: _acc
+def each_squared([h | t], acc), do: each_squared(t, [h * h | acc])
+
+# GOOD
+Enum.map(list, &(&1 * &1))
+```
+
+### When recursion meets Stream — custom lazy source
+
+When your recursive walker is over a large/unbounded structure, wrap it in `Stream.resource/3` so consumers can `take/take_while` and stop early:
+
+```elixir
+# Lazy depth-first tree traversal
+def lazy_preorder(tree) do
+  Stream.resource(
+    fn -> [tree] end,     # stack of nodes to visit
+    fn
+      [] -> {:halt, []}
+      [%Tree{value: v, children: cs} | rest] -> {[v], cs ++ rest}
+    end,
+    fn _ -> :ok end
+  )
+end
+
+# Consumer stops at first 5 matching nodes — walker never visits the rest
+lazy_preorder(huge_tree)
+|> Stream.filter(& &1 > 100)
+|> Enum.take(5)
+```
+
+See `Stream.resource/3` earlier in this file for the three-argument contract.
 
 ---
 
@@ -843,6 +1387,698 @@ rescue
   ArgumentError -> {:error, :malformed}
 end
 ```
+
+---
+
+## Advanced Reduce Patterns
+
+Beyond `Enum.reduce/3` with a single accumulator, real codebases (Ecto, Phoenix LiveView, Plug) use richer reducer patterns:
+
+### Multi-accumulator reduce (tuple state)
+
+```elixir
+# Partition a stream in a single pass (from Ecto.Changeset)
+{changes, errors, valid?} =
+  Enum.reduce(new_changes, {old_changes, [], true}, fn
+    {key, value}, {changes, errors, valid?} ->
+      case validate(key, value) do
+        :ok -> {Map.put(changes, key, value), errors, valid?}
+        {:error, msg} -> {changes, [{key, msg} | errors], false}
+      end
+  end)
+```
+
+When Enum has a dedicated function for the pattern, prefer it:
+- Two-list partition → `Enum.split_with/2`
+- Group by a key → `Enum.group_by/2,3`
+- Count per key → `Enum.frequencies_by/2`
+
+### `Enum.reduce_while/3` with complex halt state
+
+Use when processing must stop mid-collection:
+
+```elixir
+# Validate config keys, halt on first unknown
+Enum.reduce_while(config, :ok, fn {key, _value}, :ok ->
+  if key in allowed_keys, do: {:cont, :ok}, else: {:halt, {:error, {:unknown, key}}}
+end)
+
+# Process within a budget
+Enum.reduce_while(items, {[], budget}, fn item, {processed, remaining} ->
+  cost = compute_cost(item)
+  if cost <= remaining do
+    {:cont, {[process(item) | processed], remaining - cost}}
+  else
+    {:halt, {Enum.reverse(processed), remaining}}
+  end
+end)
+```
+
+### `Enum.map_reduce/3` — transform + thread state
+
+Map each element to a new value while threading an accumulator:
+
+```elixir
+# Transform + accumulate params (from Ecto.Query.Builder)
+{escaped, params_acc} =
+  Enum.map_reduce(exprs, params, fn expr, p ->
+    {escaped_expr, new_params} = escape(expr, type, p, vars)
+    {escaped_expr, new_params}
+  end)
+
+# Assign sequential IDs
+{items_with_ids, _next} =
+  Enum.map_reduce(items, 1, fn item, id ->
+    {Map.put(item, :id, id), id + 1}
+  end)
+```
+
+### `Enum.flat_map_reduce/3` — emit 0..N per element with state
+
+Use when each input produces a variable number of outputs AND you need to thread state:
+
+```elixir
+# Delete components while tracking remaining state (from Phoenix LiveView)
+{deleted_cids, new_state} =
+  Enum.flat_map_reduce(cids, state, fn cid, acc ->
+    {deleted, components} = delete_component(cid, acc.components)
+    {deleted, %{acc | components: components}}
+  end)
+
+# Expand aliases: each input may become 0, 1, or many outputs
+{all_envs, seen} =
+  Enum.flat_map_reduce(inputs, MapSet.new(), fn name, seen ->
+    cond do
+      name in seen -> {[], seen}
+      String.contains?(name, "@") -> {expand_group(name), MapSet.put(seen, name)}
+      true -> {[name], MapSet.put(seen, name)}
+    end
+  end)
+```
+
+### `Enum.scan/2,3` — running totals (rare, but useful for cumulative state)
+
+Like `reduce` but emits every intermediate accumulator:
+
+```elixir
+# Running totals
+Enum.scan([10, 20, 30, 40], 0, &(&1 + &2))
+# [10, 30, 60, 100]
+
+# State evolution (e.g., replaying events)
+states = Enum.scan(events, initial_state, &apply_event/2)
+# [state_after_event_1, state_after_event_2, ...]
+```
+
+Use `Stream.scan/2,3` if the events list is large and you want lazy intermediates.
+
+### Building maps/keyword lists from reducers
+
+When collecting into a shape, prefer `Map.new/2` / `Enum.into/2` over manual reduce:
+
+```elixir
+# GOOD — prefer Map.new when collecting
+Map.new(pairs, fn {k, v} -> {k, transform(v)} end)
+
+# GOOD — conditional filter in reduce (when Map.new doesn't fit)
+Enum.reduce([timeout: t, retries: r, verbose: v], [], fn
+  {_key, nil}, acc -> acc            # skip nil values
+  {key, value}, acc -> [{key, value} | acc]
+end)
+```
+
+### Decision: which reducer?
+
+| You need to… | Use |
+|---|---|
+| Reduce to a single value | `Enum.reduce/2,3` |
+| Halt partway through | `Enum.reduce_while/3` |
+| Transform while threading state | `Enum.map_reduce/3` |
+| Emit 0..N per element + thread state | `Enum.flat_map_reduce/3` |
+| Emit running/intermediate values | `Enum.scan/2,3` (or `Stream.scan/2,3`) |
+| Partition into two | `Enum.split_with/2` (not reduce) |
+| Group by key | `Enum.group_by/2,3` (not reduce) |
+| Build a map | `Map.new/2` (not reduce into `%{}`) |
+| Count per key | `Enum.frequencies_by/2` (not reduce) |
+
+---
+
+## Protocols
+
+A **protocol** is data-dispatch polymorphism: one function, many implementations per data type. Elixir dispatches at runtime based on the first argument's type.
+
+**Use a protocol when:** you want different data types (structs, built-in types) to share a method like `encode/1`, `render/1`, `to_param/1`. See `../elixir-planning/architecture-patterns.md` for the Behaviour-vs-Protocol decision.
+
+### Defining a protocol
+
+```elixir
+# Most protocols: single function
+defprotocol MyApp.Renderable do
+  @spec render(t()) :: iodata()
+  def render(term)
+end
+
+# With a fallback when Any is a reasonable default
+defprotocol MyApp.Parameterizable do
+  @fallback_to_any true
+  @spec to_param(t()) :: String.t()
+  def to_param(term)
+end
+```
+
+**Rule of thumb:** prefer single-function protocols (matches stdlib). Multi-function only for performance callbacks (Enumerable's `count/1`, `member?/2`, `slice/1`).
+
+### Implementing — structs
+
+```elixir
+# In the struct's own module (preferred — @derive-able, single source of truth)
+defmodule MyApp.Widget do
+  defstruct [:name, :html]
+
+  defimpl MyApp.Renderable do
+    def render(%{html: html}), do: html
+  end
+end
+
+# Outside the struct's module (for foreign structs)
+defimpl MyApp.Renderable, for: MyApp.Alert do
+  def render(%{message: m, level: l}), do: ~s(<div class="#{l}">#{m}</div>)
+end
+```
+
+### Implementing — built-in types
+
+The 11 built-in types for `defimpl, for:` are `Atom`, `BitString`, `Float`, `Function`, `Integer`, `List`, `Map`, `PID`, `Port`, `Reference`, `Tuple` — plus `Any` for fallback.
+
+```elixir
+defimpl MyApp.Renderable, for: BitString do
+  # Guard — BitString includes non-binary bitstrings
+  def render(binary) when is_binary(binary), do: binary
+  def render(bits), do: raise Protocol.UndefinedError, protocol: @protocol, value: bits
+end
+
+defimpl MyApp.Renderable, for: List do
+  def render(iolist), do: iolist     # IO lists are already iodata
+end
+
+# Multiple types at once
+defimpl MyApp.Renderable, for: [Integer, Float] do
+  def render(n), do: to_string(n)
+end
+```
+
+### `@derive` — compile-time protocol implementation
+
+```elixir
+defmodule MyApp.User do
+  # @derive MUST come BEFORE defstruct/schema (compiler warns otherwise)
+  @derive {Jason.Encoder, only: [:id, :name, :email]}
+  @derive {Phoenix.Param, key: :username}
+  @derive {Inspect, only: [:id, :name]}      # hides password_hash from logs
+  defstruct [:id, :name, :email, :username, :password_hash]
+end
+```
+
+For **structs you don't own** (third-party), use `Protocol.derive/3`:
+
+```elixir
+require Protocol
+Protocol.derive(Jason.Encoder, SomeLibrary.Thing, only: [:id, :name])
+```
+
+### `@fallback_to_any` — when
+
+| Protocol | Has fallback? | Why |
+|---|---|---|
+| `Inspect` | Yes | Default `%Module{...}` printing for all structs |
+| `Phoenix.Param` | Yes | Convention: assumes `:id` field exists |
+| `Plug.Exception` | Yes | Default 500 status, empty actions |
+| `Jason.Encoder` | Yes, but raises | Encourages `@derive` |
+| `Enumerable` | **No** | Must fail loudly on non-enumerable input |
+| `String.Chars` | **No** | Silent garbage output would hide bugs |
+| `Collectable` | **No** | No sensible default |
+
+**Alternative to `@fallback_to_any`** (Elixir 1.18+) — customize the error message without providing a fallback:
+
+```elixir
+defprotocol MyApp.Encoder do
+  @undefined_impl_description """
+  protocol must be explicitly implemented.
+  Add `@derive {MyApp.Encoder, only: [...]}` before defstruct.
+  """
+  def encode(term)
+end
+```
+
+### Enumerable / Collectable / Inspect — common implementations
+
+**`Inspect`** — customize `inspect/2` output (use `@derive {Inspect, only: [...]}` for most cases):
+
+```elixir
+defimpl Inspect, for: MyApp.Money do
+  import Inspect.Algebra
+  def inspect(%{cents: c, currency: cur}, opts) do
+    concat(["#Money<", to_string(cur), " ", Integer.to_string(div(c, 100)), ".", Integer.to_string(rem(c, 100)), ">"])
+  end
+end
+```
+
+**`String.Chars`** — enables `to_string/1` and `"#{value}"`:
+
+```elixir
+defimpl String.Chars, for: MyApp.Money do
+  def to_string(%{cents: c, currency: cur}) do
+    "#{cur} #{Float.round(c / 100, 2)}"
+  end
+end
+```
+
+**`Enumerable`** — make a struct usable in `Enum.*`:
+
+```elixir
+defimpl Enumerable, for: MyApp.Tree do
+  def count(%{size: n}), do: {:ok, n}             # or {:error, __MODULE__} for O(n)
+  def member?(%{nodes: ns}, v), do: {:ok, v in ns}
+  def slice(_), do: {:error, __MODULE__}           # fall back to reduce
+  def reduce(tree, acc, fun), do: do_reduce(to_list(tree), acc, fun)
+
+  defp do_reduce(_, {:halt, acc}, _), do: {:halted, acc}
+  defp do_reduce(list, {:suspend, acc}, fun), do: {:suspended, acc, &do_reduce(list, &1, fun)}
+  defp do_reduce([], {:cont, acc}, _), do: {:done, acc}
+  defp do_reduce([h | t], {:cont, acc}, fun), do: do_reduce(t, fun.(h, acc), fun)
+end
+```
+
+Return `{:error, __MODULE__}` from `count/1`, `member?/2`, `slice/1` when O(1) isn't possible — Elixir falls back to `reduce/3`.
+
+**`Collectable`** — enables `Enum.into(enum, %MyStruct{})`:
+
+```elixir
+defimpl Collectable, for: MyApp.Bag do
+  def into(bag) do
+    collector = fn
+      acc, {:cont, elem} -> MyApp.Bag.add(acc, elem)
+      acc, :done -> acc
+      _acc, :halt -> :ok
+    end
+    {bag, collector}
+  end
+end
+```
+
+### Protocol consolidation
+
+In production (`MIX_ENV=prod`), Elixir **consolidates** protocols — pre-computes dispatch tables so calls are O(1). In dev/test, dispatch is O(n) in the number of implementations.
+
+```elixir
+# mix.exs — enabled by default in releases
+def project do
+  [consolidate_protocols: Mix.env() != :test]
+end
+```
+
+Consolidation is why `@derive` must come before `defstruct` — the compiler collects implementations at compile time.
+
+### Making a protocol derivable
+
+If you want users to `@derive YourProtocol, opts` on their structs, implement `__deriving__/3`:
+
+```elixir
+defprotocol MyApp.Cacheable do
+  @fallback_to_any true
+  @spec cache_key(t()) :: String.t()
+  def cache_key(term)
+end
+
+defimpl MyApp.Cacheable, for: Any do
+  defmacro __deriving__(module, _struct, opts) do
+    keys = Keyword.get(opts, :keys, [:id])
+    quote do
+      defimpl MyApp.Cacheable, for: unquote(module) do
+        def cache_key(%{unquote_splicing(Enum.map(keys, &{&1, Macro.var(&1, nil)}))}) do
+          unquote("#{module}:") <>
+            Enum.map_join(unquote(Enum.map(keys, &Macro.var(&1, nil))), ":", &to_string/1)
+        end
+      end
+    end
+  end
+
+  def cache_key(_), do: raise "Cacheable not derived — add @derive MyApp.Cacheable"
+end
+```
+
+Users now: `@derive {MyApp.Cacheable, keys: [:org_id, :id]}`.
+
+### Common anti-patterns
+
+**`@derive` after `defstruct`:**
+
+```elixir
+# BAD — compiler warns, derivation may not apply
+defmodule User do
+  defstruct [:id, :name]
+  @derive Jason.Encoder   # too late
+end
+
+# GOOD
+defmodule User do
+  @derive Jason.Encoder
+  defstruct [:id, :name]
+end
+```
+
+**`defimpl for: Map` expecting to match structs:**
+
+```elixir
+# BAD — this matches ONLY bare %{} maps, not structs
+defimpl MyApp.Renderable, for: Map do
+  def render(m), do: inspect(m)
+end
+
+# GOOD — structs dispatch separately; implement per struct
+defimpl MyApp.Renderable, for: MyApp.Widget do
+  def render(%{...}), do: ...
+end
+```
+
+**Protocol where a behaviour fits:**
+
+```elixir
+# BAD — "strategy" where the strategy is a MODULE (no data to dispatch on)
+defprotocol StorageBackend, do: def put(backend, key, value)
+
+# GOOD — behaviour for strategy
+defmodule StorageBackend do
+  @callback put(String.t(), term()) :: :ok | {:error, term()}
+end
+
+# Config chooses the implementation
+config :my_app, :storage, MyApp.RedisBackend
+```
+
+See `../elixir-planning/architecture-patterns.md` for the Behaviour vs Protocol decision table.
+
+---
+
+## Behaviours
+
+A **behaviour** is module-dispatch polymorphism: a named contract (`@callback`s) and one or more modules that `@behaviour MyContract` and implement those callbacks. The caller picks which module to use — typically at config time, or by receiving a module atom.
+
+**Use a behaviour when:**
+- The implementation is chosen per-environment (test double vs real implementation).
+- Pluggable strategies / adapters (hexagonal architecture ports).
+- Multiple implementations at once (multiple storage backends, multiple email providers).
+- The stdlib framework pattern (GenServer, Plug, Supervisor, `:gen_statem`).
+
+See `../elixir-planning/architecture-patterns.md` for the architectural decision.
+
+### Defining a behaviour
+
+```elixir
+defmodule MyApp.Storage do
+  @moduledoc """
+  Contract for key-value storage backends.
+  """
+
+  @type key :: String.t()
+  @type value :: binary()
+
+  @callback put(key(), value()) :: :ok | {:error, term()}
+  @callback get(key()) :: {:ok, value()} | :error
+  @callback delete(key()) :: :ok
+
+  @callback keys(prefix :: String.t()) :: [key()]
+  @optional_callbacks keys: 1
+end
+```
+
+**Key directives:**
+- `@callback fun(arg_type()) :: return_type()` — required contract.
+- `@macrocallback` — same, but the implementation must be a macro (rare; framework internals like Ecto.Query).
+- `@optional_callbacks [fun: arity, ...]` — may be left unimplemented. Callers must check via `function_exported?/3` before invoking.
+- `@type`s in a behaviour module are part of its public contract.
+
+### Implementing a behaviour
+
+```elixir
+defmodule MyApp.Storage.Redis do
+  @behaviour MyApp.Storage
+
+  @impl true
+  def put(key, value), do: Redix.command(:my_redis, ["SET", key, value])
+
+  @impl true
+  def get(key) do
+    case Redix.command(:my_redis, ["GET", key]) do
+      {:ok, nil} -> :error
+      {:ok, value} -> {:ok, value}
+    end
+  end
+
+  @impl true
+  def delete(key), do: Redix.command(:my_redis, ["DEL", key]) |> elem(0)
+
+  @impl true
+  def keys(prefix), do: Redix.command!(:my_redis, ["KEYS", prefix <> "*"])
+end
+```
+
+**`@impl` is mandatory.** Options:
+- `@impl true` — asserts "this implements a callback from one of the declared `@behaviour`s."
+- `@impl ModuleName` — names which behaviour (required when implementing multiple behaviours with overlapping callback names).
+
+The compiler errors on:
+- A function marked `@impl` that doesn't match a callback (typo in function name).
+- A callback without a corresponding `@impl` (missing implementation).
+
+### Calling into a behaviour
+
+**Config-time dispatch** (most common — choose per-environment):
+
+```elixir
+# config/config.exs
+config :my_app, :storage, MyApp.Storage.Redis
+
+# config/test.exs
+config :my_app, :storage, MyApp.Storage.Mock
+```
+
+```elixir
+defmodule MyApp.Cache do
+  @storage Application.compile_env!(:my_app, :storage)
+
+  def get(key), do: @storage.get(key)
+  def put(key, value), do: @storage.put(key, value)
+end
+```
+
+**Runtime dispatch** (when the backend is data — e.g., per-tenant):
+
+```elixir
+def get(backend, key), do: backend.get(key)
+
+# Caller:
+MyApp.Cache.get(MyApp.Storage.Redis, "user:42")
+```
+
+### `use` + `__using__/1` — behaviour with defaults
+
+When a behaviour has obvious defaults for most callbacks, provide them via `use`:
+
+```elixir
+defmodule MyApp.JobWorker do
+  @callback perform(map()) :: :ok | {:error, term()}
+  @callback retry_delay(attempt :: non_neg_integer()) :: pos_integer()
+
+  defmacro __using__(_opts) do
+    quote do
+      @behaviour MyApp.JobWorker
+
+      # Default implementation — subclasses override if needed
+      @impl true
+      def retry_delay(attempt), do: trunc(:math.pow(2, attempt) * 1_000)
+
+      defoverridable retry_delay: 1
+    end
+  end
+end
+
+# Usage — worker gets @behaviour + default retry_delay
+defmodule MyApp.SendEmailJob do
+  use MyApp.JobWorker
+
+  @impl true
+  def perform(%{"to" => to, "body" => body}), do: Mailer.send(to, body)
+  # retry_delay/1 inherited — or override:
+  # def retry_delay(_), do: 60_000
+end
+```
+
+**`defoverridable`** marks functions injected by `use` as overridable so the using module can replace them. The overriding function can call the original via `super/1`.
+
+### Testing with Mox
+
+`Mox.defmock/2` creates a test-only module implementing your behaviour:
+
+```elixir
+# test/test_helper.exs
+Mox.defmock(MyApp.Storage.Mock, for: MyApp.Storage)
+
+# In a test
+MyApp.Storage.Mock
+|> expect(:get, fn "user:42" -> {:ok, "alice"} end)
+|> expect(:put, fn "user:42", "bob" -> :ok end)
+
+assert {:ok, "alice"} = MyApp.Cache.get("user:42")
+```
+
+See `testing-patterns.md` for full Mox setup.
+
+### Decision: `@callback` vs `@optional_callbacks` vs default via `use`
+
+| Situation | Use |
+|---|---|
+| All implementations MUST provide this | `@callback` (required) |
+| Most skip this; a few implement for optimization | `@optional_callbacks` (caller checks `function_exported?/3`) |
+| All implementations would write nearly the same code | `@callback` + default in `__using__/1` with `defoverridable` |
+| Contract shared across projects (a library) | Behaviour in a standalone module — no `use` (users should write `@behaviour` explicitly) |
+
+### Common anti-patterns
+
+**Missing `@impl`:**
+
+```elixir
+# BAD — typo in `hanle_call` compiles silently; callback missing
+defmodule MyServer do
+  use GenServer
+  def hanle_call(_, _, s), do: {:reply, :ok, s}
+end
+
+# GOOD — @impl catches typos at compile time
+defmodule MyServer do
+  use GenServer
+  @impl true
+  def handle_call(_, _, s), do: {:reply, :ok, s}
+end
+```
+
+**`Application.get_env` at every call instead of `compile_env`:**
+
+```elixir
+# BAD — reads env dict on every invocation
+def get(key), do: Application.get_env(:my_app, :storage).get(key)
+
+# GOOD — bound at compile time
+@storage Application.compile_env!(:my_app, :storage)
+def get(key), do: @storage.get(key)
+```
+
+(Use `Application.get_env` only when the backend must be switchable at runtime.)
+
+**Behaviour with a single implementation:**
+
+```elixir
+# BAD — behaviour + one concrete impl just to "use DI"
+defmodule MyApp.EmailSender, do: @callback send(to, body) :: :ok
+defmodule MyApp.EmailSender.Swoosh, do: @behaviour MyApp.EmailSender; ...
+
+# Only one prod implementation, no tests using it → behaviour is noise
+# GOOD — a plain module; introduce behaviour only when a second impl (or Mox) is needed
+defmodule MyApp.EmailSender do
+  def send(to, body), do: Swoosh.deliver(...)
+end
+```
+
+**Rule:** add a behaviour when you have a real second implementation (test double, alternate backend). Don't add behaviours "just in case."
+
+**Cross-behaviour ambiguity:**
+
+```elixir
+# BAD — two behaviours both define handle_call/3; which does @impl true mean?
+defmodule Dual do
+  @behaviour A
+  @behaviour B
+  @impl true
+  def handle_call(req, from, state), do: ...
+end
+
+# GOOD — name the behaviour
+@impl A
+def handle_call(req, from, state), do: ...
+```
+
+---
+
+## Imperative → Elixir Translation
+
+For engineers coming from JavaScript / Python / Ruby / Go — the cheat sheet.
+
+### Collection operations
+
+| Imperative | Elixir |
+|---|---|
+| `for (x of list) result.push(f(x))` | `Enum.map(list, &f/1)` |
+| `for (x of list) if (p(x)) result.push(x)` | `Enum.filter(list, &p/1)` |
+| `let acc = init; for (...) acc = f(acc, x)` | `Enum.reduce(list, init, fn x, acc -> ... end)` |
+| `list.find(x => p(x))` | `Enum.find(list, &p/1)` |
+| `list.some(x => p(x))` | `Enum.any?(list, &p/1)` |
+| `list.every(x => p(x))` | `Enum.all?(list, &p/1)` |
+| `list.flatMap(x => f(x))` | `Enum.flat_map(list, &f/1)` |
+| `[...new Set(list)]` | `Enum.uniq(list)` |
+| `list.sort((a,b) => a.name - b.name)` | `Enum.sort_by(list, & &1.name)` |
+| `Object.groupBy(list, x => x.type)` | `Enum.group_by(list, & &1.type)` |
+| `_.countBy(list, f)` | `Enum.frequencies_by(list, &f/1)` |
+| `_.chunk(list, 3)` | `Enum.chunk_every(list, 3)` |
+| `_.partition(list, pred)` | `Enum.split_with(list, &pred/1)` |
+| `list.join(", ")` | `Enum.join(list, ", ")` |
+| `Math.max(...list)` | `Enum.max(list)` |
+| `list.reduce((a, b) => a + b, 0)` | `Enum.sum(list)` |
+
+### Control flow
+
+| Imperative | Elixir |
+|---|---|
+| `if / else if / else` on types | Multi-clause function with pattern matching |
+| `switch (x.type)` | `case x.type do ... end` (or multi-clause function) |
+| `if (x != null && x.active)` | `def f(%{active: true} = x)` (pattern match) |
+| `try { risky() } catch(e) {...}` | `case risky() do {:ok, v} -> v; {:error, _} -> fallback end` |
+| `for (...) if (done) break` | `Enum.reduce_while(list, acc, fn x, acc -> {:cont/:halt, ...} end)` |
+| `while (cond) {...}` | Recursive function with guard; or `Stream.iterate/2` |
+| `return early` | Pattern match + multi-clause function |
+| `goto` / labels | You don't. Recursion or `reduce_while` handles all early-exit cases. |
+
+### Data mutation → transformation
+
+| Imperative | Elixir |
+|---|---|
+| `obj.key = value` | `%{map \| key: value}` or `Map.put(map, key, value)` |
+| `obj.a.b.c = value` | `put_in(obj, [:a, :b, :c], value)` |
+| `obj.count++` | `update_in(obj, [:count], &(&1 + 1))` |
+| `delete obj.key` | `Map.delete(map, key)` |
+| `list.push(item)` | `[item \| list]` (prepend is O(1)) |
+| `list.pop()` | `[head \| tail] = list` (pattern match) |
+| `set.add(item)` | `MapSet.put(set, item)` |
+| `str += chunk` in a loop | IO list: `[chunk \| acc]`, flatten with `IO.iodata_to_binary/1` |
+| `"Hello " + name + "!"` | `"Hello #{name}!"` (interpolation) |
+| `result = ""; for (x) result += f(x)` | `Enum.map_join(items, ", ", &f/1)` |
+| `x ?? default` (null-coalesce) | `x \|\| default` (careful — `\|\|` also catches `false`) |
+| `x?.y?.z` (optional chaining) | `get_in(x, [:y, :z])` |
+
+### State and side effects
+
+| Imperative | Elixir |
+|---|---|
+| Global mutable variable | Application env + `Application.get_env/3` OR `:persistent_term` OR a GenServer |
+| Class instance with fields + methods | Module with struct + functions taking struct as first arg |
+| Singleton | Named GenServer, or `:persistent_term` for read-heavy |
+| Promise / async/await | `Task.async/1` + `Task.await/1` |
+| Thread pool | `Task.Supervisor` + `Task.async_stream/3` |
+| Event emitter / observer | `Phoenix.PubSub.broadcast/3` |
+| Try/finally cleanup | `try do ... after ... end`, or supervised process with `terminate/2` |
+| Long-lived network connection | Supervised GenServer with `:gen_tcp` |
+| Exception propagation up the stack | Supervisor restart + tagged tuple returns |
+
+**The single biggest mindset shift:** you don't mutate — you **transform**. Every function takes data in and returns new data out. The "state" of your program is a value flowing through a pipeline, not a location being overwritten.
 
 ---
 

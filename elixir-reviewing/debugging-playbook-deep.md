@@ -395,13 +395,83 @@ Common causes:
 
 ---
 
+## `IEx.break!/2` — Breakpoints Without Code Changes
+
+When you can't or don't want to modify source (production-style node, third-party library, debugging a compiled release), set a breakpoint from the IEx shell.
+
+```elixir
+# Start IEx with your app loaded:
+iex -S mix
+
+# In the shell — break on the next call to MyMod.my_fun/2
+iex> break!(MyMod, :my_fun, 2)
+# → #PID<0.123.0> is printed; a breakpoint is armed.
+
+# When any process calls MyMod.my_fun/2, execution pauses
+# and that process drops into an IEx pry session.
+# All local bindings (args + variables in scope) are accessible.
+```
+
+### Managing breakpoints
+
+```elixir
+# List active breakpoints
+iex> breaks()
+# [ID: 1, module: MyMod, function: my_fun/2, hits: 0, active: true]
+
+# Break at a specific line
+iex> break!(MyMod, 42)   # line number instead of function
+
+# Remove a breakpoint
+iex> remove_breaks(MyMod)    # all in module
+iex> remove_breaks()         # all everywhere
+
+# Reset hit count (keeps breakpoint armed)
+iex> reset_break(id)
+
+# Deactivate without removing
+iex> disable_break(id)
+iex> enable_break(id)
+```
+
+### Hit count
+
+By default, `break!/2` fires every time. Limit to N hits:
+
+```elixir
+iex> break!(MyMod, :my_fun, 2, 5)   # fires 5 times, then auto-removes
+```
+
+### Conditional breakpoints (pattern match)
+
+`break!/2,3,4` accepts a function with a pattern — pause only when the pattern matches:
+
+```elixir
+# Break only when the first arg is :admin
+iex> break!(MyMod.my_fun(:admin, _))
+# (uses the `defmodule`/`def` capture syntax)
+```
+
+### When to use break! vs IEx.pry vs dbg
+
+| Tool | Situation |
+|---|---|
+| `dbg/1` | You're editing the code and want pipeline-aware inspection. Ship cleanup. |
+| `IEx.pry/0` | You're editing the code and want an interactive breakpoint. |
+| `break!/2` | You can't edit the code (third-party lib, compiled release, production-shape node). |
+
+**Safety:** `break!/2` is for dev/staging. Do not use in a production node serving real traffic — the paused process blocks its mailbox.
+
+---
+
 ## Debugging Tools Cheat Sheet
 
 | Tool | Use for | Safety |
 |---|---|---|
 | `IO.inspect/2` | Check a single value mid-pipeline | Always safe |
 | `dbg/1` | Inspect multiple values in a block | Always safe |
-| `IEx.pry/0` | Interactive breakpoint | Dev only |
+| `IEx.pry/0` | Interactive breakpoint (requires source edit) | Dev only |
+| `IEx.break!/2,3,4` | Breakpoint without modifying source | Dev / staging only |
 | `:recon.proc_count/2` | Top processes by metric | Safe in production |
 | `:recon_trace.calls/3` | Trace live function calls (bounded) | Safe in production (with count limit) |
 | `:observer.start()` | GUI inspection | Dev only |
