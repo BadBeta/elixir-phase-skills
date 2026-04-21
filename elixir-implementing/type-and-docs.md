@@ -21,6 +21,7 @@ Phase-focused on **writing** `@spec`, `@type`, `@doc`, `@moduledoc`, doctests, a
 11. **NEVER put sensitive data in `@doc`/`@moduledoc` examples.** These end up in HexDocs.
 12. **ALWAYS run `mix dialyzer`** in CI for projects with established specs. A warning means the spec doesn't match the code.
 13. **Documentation claims MUST match the code.** If `@moduledoc` or `@doc` asserts a behaviour ("binds to both IPv4 and IPv6 loopback", "accepts POST with JSON body", "raises on invalid input"), there must be code that implements it AND a test that exercises it. Stale claims are worse than missing docs — they mislead readers who trust the doc. Treat moduledoc promises as test targets: every non-obvious claim → a named test that asserts it.
+14. **Moduledocs across related modules MUST agree.** When two or more modules describe the same subsystem from different angles (e.g., an `Application` module, a supervised endpoint, a defence-in-depth plug), their moduledoc claims about that shared system must be consistent. A drift between `ModuleA` saying "binds to IPv4 only" and `ModuleB` saying "binds to IPv4 + IPv6" is the same defect as Rule 13, just distributed across files — and harder for a reader to spot. When you change behaviour in one module, grep for every moduledoc that names the changed subsystem (endpoint, protocol, callback contract) and update them together as one atomic change.
 
 ---
 

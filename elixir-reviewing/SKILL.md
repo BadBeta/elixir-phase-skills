@@ -266,6 +266,7 @@ Full reference: `elixir-planning` §14. Flag these if you see them in a diff.
 | Domain module aliasing `MyAppWeb.*`, `Phoenix.*`, `Routes.*` | Keep domain framework-agnostic; move URL generation to interface layer | Block | planning §14.2 |
 | Controller / LiveView / CLI calling `Repo.X` directly | Call the owning context's public API | Block | planning §14.3 |
 | Business logic in a controller action, LiveView handler, or CLI handler | Move to a context function; interface translates + delegates + formats | Block | planning §14.3 |
+| `Plug.Router` route block calls another Plug module's `call/2` directly with raw opts (e.g. `get "/", do: Handler.call(conn, [])`) | Pre-initialize at compile time: `@handler_opts Handler.init([])` and `get "/", do: Handler.call(conn, @handler_opts)`. Bypassing `init/1` drops opt normalization — a latent trap that breaks silently the moment `init/1` stops being a no-op | Block | implementing production-patterns §Plug.Router dispatch |
 | Two contexts writing to the same table | One owns it; the other reads through owner's API or uses PubSub | Block | planning §14.11 |
 | `Repo.preload(:other_context_association)` across contexts | Ask the owning context for assembled data | Request-change | planning §14.12 |
 | One context's internal module called from another context | Go through the owning context's public API | Request-change | planning §6.4 |
@@ -282,6 +283,7 @@ Full reference: `elixir-planning` §14. Flag these if you see them in a diff.
 | Union type variant with `{:tag, nil}` payload sentinel | Use bare atom: `:tag` — don't carry a nil payload | Nitpick | implementing type-and-docs §Union types |
 | Public `@spec` uses a loose type (`atom()`, `map()`, `[term()]`) where a named `@type` is already defined in scope | Reuse the named alias: `MyMod.instruction()`, `MyMod.t()`, `[MyMod.entry()]` | Suggest | implementing type-and-docs rule 7 |
 | `@moduledoc` / `@doc` asserts a behaviour (binds to both X and Y, rejects Z, accepts ranges A..B) not exercised by a test | Add a test that pins the claim, OR update the doc to match the code. Stale docs mislead worse than missing docs do | Request-change | implementing type-and-docs rule 13 |
+| Two moduledocs that describe the same subsystem disagree (e.g., `App.Application` says "binds IPv4 only" while `Plugs.RequireLoopback` says "binds IPv4 + IPv6") | Reconcile both moduledocs against the code as one atomic change. Cross-file contradictions are Rule 13 distributed — harder to spot, same defect | Block | implementing type-and-docs rule 14 |
 | Plug's `init/1` / `call/2` uses `Plug.opts()` when the plug actually accepts specific keys | Define a narrow `@type opts :: [...]` and use it in both specs | Suggest | implementing type-and-docs §Plug signature |
 | New feature is a library candidate but uses `Application.compile_env` | For library code, use runtime `get_env` or config-via-args | Block (if library) | planning §10.3 |
 
@@ -446,7 +448,8 @@ Full reference: `elixir-implementing` §8.6, `elixir-planning` §10.
 | `Application.compile_env` in a library | Runtime `get_env` or accept config via options | Block (if library) |
 | Missing default in `Application.get_env(:app, :key)` | Provide default (`get_env(:app, :key, default)`), or use `fetch_env!` if required | Request-change |
 | Config value read on every call (hot path) | Cache in module attribute (app), `:persistent_term` (library hot path), or `Application.compile_env` (app) | Suggest |
-| Application code uses `Application.get_env` for a value that's set once at boot and never changes | Switch to `Application.compile_env` — Dialyzer sees the concrete type, missing-key crashes at compile, recompile triggers on config change | Suggest | implementing §10.5 |
+| Application code uses `Application.get_env` for a value that's truly frozen at compile time (no `runtime.exs` override, no test `put_env`) | Switch to `Application.compile_env` — Dialyzer sees the concrete type, missing-key crashes at compile, recompile triggers on config change. **Don't blindly switch:** if `config/runtime.exs` or any test overrides the key at runtime, `compile_env` silently freezes the default and breaks those flows. Verify both paths before changing | Suggest | implementing §10.5 |
+| `config/runtime.exs` parses an env var with `String.to_integer/1`, `String.to_atom/1`, etc. on raw input | Wrap with explicit validation: `case Integer.parse(val) do {n, ""} when n in range -> n; _ -> raise "VAR_NAME must be X, got: #{inspect(val)}" end`. A raw conversion exception at boot gives ops a stacktrace instead of a message | Request-change | implementing production-patterns §runtime.exs |
 | Hardcoded URLs / credentials / secrets | Move to config + env var | Block |
 | Test config imported into runtime code | Keep `config/test.exs` isolated; production should never import test config | Block |
 

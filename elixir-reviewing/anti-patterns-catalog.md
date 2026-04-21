@@ -935,6 +935,97 @@ end
 
 Better still: promote reflection to its own function (see D9 above).
 
+### D13. Cross-module moduledoc disagreement
+
+**Why it's bad:** A reader lands on one module, trusts the moduledoc, and writes code against a contract the *other* module contradicts. It's the distributed form of "docs don't match code" — and harder to spot because each individual moduledoc looks internally consistent. Common triggers: binding/listening details (IPv4 vs IPv6), request-pipeline order, or "this is defence in depth" framing where the base-line assumption drifts between modules.
+
+```elixir
+# BAD — two modules disagree about what the endpoint binds to
+
+defmodule MyApp do
+  @moduledoc """
+  Binds to IPv4 loopback (`127.0.0.1`) only.
+  """
+end
+
+defmodule MyApp.Plugs.RequireLoopback do
+  @moduledoc """
+  Defence in depth — the endpoint already binds to `127.0.0.1` + `::1`.
+  """
+end
+```
+
+```elixir
+# GOOD — both moduledocs agree; one cites the other as source of truth
+
+defmodule MyApp do
+  @moduledoc """
+  Binds to IPv4 loopback (`127.0.0.1`) only. See `MyApp.Application`.
+  """
+end
+
+defmodule MyApp.Plugs.RequireLoopback do
+  @moduledoc """
+  Defence in depth — the endpoint (see `MyApp.Application`) binds to IPv4 loopback
+  only; this plug also accepts IPv6 loopback so the pipeline stays correct if
+  that binding is ever broadened.
+  """
+end
+```
+
+**How to catch it:** when you change subsystem behaviour (ports, protocols, bindings, contracts, callback arities), grep for every moduledoc that mentions the changed subsystem — treat the moduledoc updates as part of the same atomic change.
+
+### D14. `Plug.Router` route calling a plug module's `call/2` with raw opts
+
+**Why it's bad:** `plug(MyPlug)` runs `MyPlug.init([])` at compile time and caches the result — that's how Plug normalization works. Calling `MyPlug.call(conn, [])` directly from a route block bypasses `init/1` entirely. Today it's "fine" because `init/1` is a no-op; the moment someone adds option validation or shape normalization to `init/1`, the route silently stops seeing normalized opts and starts violating the module's assumptions.
+
+```elixir
+# BAD — bypasses Handlers.Home.init/1
+get "/" do
+  Handlers.Home.call(conn, [])
+end
+```
+
+```elixir
+# GOOD — pre-initialize at compile time, mirroring how `plug()` would
+@home_opts Handlers.Home.init([])
+
+get("/", do: Handlers.Home.call(conn, @home_opts))
+```
+
+Alternative: if you don't need per-route paths, just `plug(Handlers.Home)` in the pipeline and let the router drive it.
+
+### D15. `runtime.exs` parses env vars with raw converters
+
+**Why it's bad:** `String.to_integer/1` raises `ArgumentError` on malformed input with no context about *which* env var failed or what was actually read. Ops sees a stacktrace at boot, not a message. The failure is fatal but unattributable.
+
+```elixir
+# BAD — typo in LOCAL_WEBVIEW_PORT gives a raw ArgumentError stacktrace
+port = System.get_env("LOCAL_WEBVIEW_PORT", "4040") |> String.to_integer()
+config :local_webview, port: port
+```
+
+```elixir
+# GOOD — explicit validation with a legible boot-time message
+raw = System.get_env("LOCAL_WEBVIEW_PORT", "4040")
+
+port =
+  case Integer.parse(raw) do
+    {port, ""} when port in 0..65_535 ->
+      port
+
+    _ ->
+      raise """
+      LOCAL_WEBVIEW_PORT must be an integer in 0..65535, got: #{inspect(raw)}.
+      Set the environment variable to a valid port number before starting the release.
+      """
+  end
+
+config :local_webview, port: port
+```
+
+The pattern extends to `String.to_atom/1`, `Date.from_iso8601!/1`, boolean coercions, etc. At every boundary where untrusted input enters at boot, prefer explicit validation over raw converters — the error message is what ops will see at 3am.
+
 ---
 
 

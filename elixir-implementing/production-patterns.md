@@ -735,6 +735,69 @@ CI builds binaries for Linux/macOS/Windows on each release; `rustler_precompiled
 
 ---
 
+## `Plug.Router` — dispatching to a plug module from a route
+
+`plug(MyPlug)` in a pipeline runs `MyPlug.init([])` at compile time and caches the result, so `call/2` at request time receives already-normalized opts. A `get "/"` route block does **not** do this for you — if you call another plug's `call/2` from a route, you must pass pre-initialized opts yourself.
+
+```elixir
+# BAD — bypasses init/1 entirely; today it works only because init/1 is a no-op
+get "/" do
+  Handlers.Home.call(conn, [])
+end
+```
+
+```elixir
+# GOOD — pre-initialize at compile time, mirroring what `plug()` would do
+@home_opts Handlers.Home.init([])
+@status_opts Handlers.Status.init([])
+
+get("/", do: Handlers.Home.call(conn, @home_opts))
+get("/status", do: Handlers.Status.call(conn, @status_opts))
+```
+
+Alternative: if the plug applies to all requests matching a prefix, use `forward/2`:
+
+```elixir
+forward("/admin", to: MyApp.AdminRouter)
+```
+
+The anti-pattern is latent — nothing breaks until someone changes `init/1` to do option validation or shape normalization, at which point the route silently violates the module's assumptions. Write the `@plug_opts` up front; the cost is two lines and the payoff is that your route dispatches through the same contract the pipeline does.
+
+---
+
+## `config/runtime.exs` — parse env vars explicitly
+
+Raw converters (`String.to_integer/1`, `String.to_atom/1`, `Date.from_iso8601!/1`) raise unattributed `ArgumentError` on malformed input. At boot time, ops sees a stacktrace with no hint about which env var was wrong. Wrap each untrusted input with explicit validation and a legible error message.
+
+```elixir
+# BAD — a typo in LOCAL_WEBVIEW_PORT gives a raw stacktrace at boot
+port = System.get_env("LOCAL_WEBVIEW_PORT", "4040") |> String.to_integer()
+config :local_webview, port: port
+```
+
+```elixir
+# GOOD — named validation, legible boot-time message
+raw = System.get_env("LOCAL_WEBVIEW_PORT", "4040")
+
+port =
+  case Integer.parse(raw) do
+    {port, ""} when port in 0..65_535 ->
+      port
+
+    _ ->
+      raise """
+      LOCAL_WEBVIEW_PORT must be an integer in 0..65535, got: #{inspect(raw)}.
+      Set the environment variable to a valid port number before starting the release.
+      """
+  end
+
+config :local_webview, port: port
+```
+
+The same discipline applies to every conversion at the config boundary: atoms, booleans (`"true"`/`"1"`), URIs, file paths. The error message is what ops reads at 3am — make it actionable.
+
+---
+
 ## Plug `halt/1` — the subtle semantics
 
 Deferred to the `phoenix` skill's Plug section — `halted?` is a conn-level flag, not early return. Key thing to remember for implementation: **`halt(conn)` marks the conn as halted but does NOT return from your function.** You must also explicitly return the halted conn.

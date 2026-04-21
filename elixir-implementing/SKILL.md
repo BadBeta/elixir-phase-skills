@@ -2717,28 +2717,39 @@ defmodule MyLib.Client do
 end
 ```
 
-**Default for app-owned config: `compile_env`.** Reach for `get_env` only when the value genuinely changes at runtime (an env var read via `runtime.exs`, a feature flag, a per-request override). Three reasons:
+**Default for app-owned config: `compile_env`** — **but only when the value is truly frozen at compile time.** Reach for `get_env` when ANY of these are true:
+
+- `config/runtime.exs` overrides the key from an env var (compile_env freezes the default; runtime.exs never takes effect).
+- Tests override the key with `Application.put_env/3` (same reason — compile_env ignores runtime writes).
+- The value can change during a running node (feature flag, per-request override).
+
+If none of those apply, `compile_env` wins for three reasons:
 
 1. **Dialyzer visibility** — `compile_env` embeds the concrete type; `get_env` returns `any()`.
 2. **Fail-fast misconfiguration** — a missing required key crashes at compile, not at first use.
 3. **Recompile trigger** — the compiler re-runs modules that depend on changed compile-env keys.
 
 ```elixir
-# BAD — app-owned port read on every call, returns any()
-def bandit_config do
-  [plug: Router, ip: {127, 0, 0, 1}, port: Application.get_env(:my_app, :port, 4040)]
-end
+# BAD — app-owned constant read on every call, returns any()
+def default_timeout, do: Application.get_env(:my_app, :default_timeout, 5_000)
 
-# GOOD — compile-time binding; value resolved once, recompile on change
-defmodule MyApp.Endpoint do
-  @port Application.compile_env(:my_app, :port, 4040)
-  def bandit_config, do: [plug: Router, ip: {127, 0, 0, 1}, port: @port]
-end
-
-# If the value MUST be runtime-settable (env var read at boot), read it in
-# runtime.exs and write to the app env there; the app-side code can still
-# be `compile_env` — it just picks up whatever runtime.exs set.
+# GOOD — value is truly constant, no runtime.exs override, no test swap
+@default_timeout Application.compile_env(:my_app, :default_timeout, 5_000)
+def default_timeout, do: @default_timeout
 ```
+
+```elixir
+# When runtime.exs overrides the value, stay on get_env
+# config/runtime.exs:
+#   if config_env() == :prod do
+#     config :my_app, port: System.get_env("MY_APP_PORT", "4040") |> parse_port()
+#   end
+#
+# GOOD — get_env reflects the runtime.exs override at boot
+def port, do: Application.get_env(:my_app, :port, 4040)
+```
+
+**Diagnostic:** before switching `get_env` to `compile_env`, grep for the key in `config/runtime.exs` AND in every test file. If either overrides it at runtime, leave `get_env` in place and document the choice in a moduledoc line — future reviewers will ask, and the answer should be findable.
 
 ### 10.6 Ecto — the implementation boundary
 
