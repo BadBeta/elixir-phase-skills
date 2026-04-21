@@ -441,6 +441,33 @@ When designing a behaviour, resist the urge to copy the full surface of the unde
 3. **Use `@optional_callbacks` sparingly.** Each optional callback is a `function_exported?` check at the call site — the flow control becomes implicit.
 4. **Version via new modules, not new callbacks.** Adding a required callback to an existing behaviour breaks all implementors. Prefer `MyApp.Storage.V2` as a new behaviour, OR make the new callback optional.
 5. **Don't leak transport concerns.** The behaviour describes what, not how. If the interface mentions `:http_status`, it's too close to HTTP.
+6. **Reflection ≠ dispatch — keep meta operations on their own callbacks.** When a behaviour has a main dispatch callback (e.g. `execute(instruction, a, b)`), don't overload it with reflection operations like "list instructions" via a sentinel value. Give reflection its own 0-arity callback (`instructions/0`, `capabilities/0`, `describe/0`).
+
+**BAD — reflection overloaded onto dispatch:**
+
+```elixir
+@callback execute(instruction :: atom(), a :: term(), b :: term()) ::
+            {:ok, {:result, term()}} | {:ok, {:instructions, [atom()]}} | {:error, term()}
+
+# Forces callers to pass dummy a/b just to ask "what can you do?":
+execute(:list_instructions, 0, 0)   # dummy ints — semantically irrelevant
+
+# And forces the implementation to validate a/b BEFORE it can realize the
+# caller didn't need them, or complicates the validation order.
+```
+
+**GOOD — reflection has its own callback:**
+
+```elixir
+@callback execute(instruction(), a(), b()) :: {:ok, output()} | {:error, error()}
+@callback instructions() :: [instruction(), ...]
+
+# Clean, typed, no dummies:
+Mod.instructions()           # reflection — pure, no args
+Mod.execute(:add, 2, 3)      # dispatch — all args meaningful
+```
+
+**Why this matters:** the overloaded form couples reflection to argument validation. Tests need to carry "valid dummy inputs" just to exercise the reflection path. Multiple signals should be multiple callbacks.
 
 **Example — good behaviour design:**
 

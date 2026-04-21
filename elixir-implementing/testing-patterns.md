@@ -773,6 +773,55 @@ Use parametrized tests for:
 - Cross-provider tests (same behaviour, different backends).
 - Cross-locale / cross-region tests.
 
+### Single test with a tabulated loop — simplest when you don't need separate test nodes
+
+For validation tables (e.g., "every one of these bad inputs should be rejected"), a single `test` with a `for` comprehension inside the body is often cleanest — one test name, all cases enumerated, rich assertion messages on failure:
+
+```elixir
+test "every non-boolean is rejected on slot :a" do
+  for bad <- [0, 1, nil, :true_atom, "true", [], {:ok, true}] do
+    assert {:error, {:invalid_input, :a, {:not_boolean, got}}} =
+             Logic.execute(:and, bad, true),
+           "expected #{inspect(bad)} to be rejected, got different shape"
+    assert got == bad
+  end
+end
+```
+
+**When to pick which:**
+
+| Pattern | When |
+|---|---|
+| `parameterize/1` (1.18+) | You want each case as a separate test node with its own pass/fail reporting. Best for human-named cases. |
+| `for {a, b} <- ... do test "..." do ... end end` (pre-1.18) | Same as above but on older Elixir. Each iteration becomes a test; attach `@tag` if you want to filter. |
+| Single `test` with inline `for` loop | Validation tables, rejection matrices, fuzzing over a small finite list. One test, all cases, fail fast on the first mismatch with a clear message. |
+
+**Anti-pattern: `@attr` rebinding to smuggle values into per-iteration tests:**
+
+```elixir
+# BAD — works but awkward; each iteration mutates a module attribute
+for bad <- [-1, 101, 1.5, nil] do
+  @bad bad
+  test "a = #{inspect(bad)} is rejected" do
+    assert {:error, _} = validate(@bad)
+  end
+end
+
+# GOOD — use unquote inside the test body (it's already inside a quote)
+for bad <- [-1, 101, 1.5, nil] do
+  test "a = #{inspect(bad)} is rejected" do
+    assert {:error, _} = validate(unquote(Macro.escape(bad)))
+  end
+end
+
+# BETTER — single test with loop (simplest)
+test "invalid :a values are all rejected" do
+  for bad <- [-1, 101, 1.5, nil] do
+    assert {:error, _} = validate(bad), "expected #{inspect(bad)} to be rejected"
+  end
+end
+```
+
 ---
 
 ## ExVCR — Recording & Replaying HTTP

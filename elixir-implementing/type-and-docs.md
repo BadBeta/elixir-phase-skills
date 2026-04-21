@@ -8,7 +8,7 @@ Phase-focused on **writing** `@spec`, `@type`, `@doc`, `@moduledoc`, doctests, a
 
 ## Rules for Writing Types & Docs
 
-1. **ALWAYS use `@spec` on every public function.** Every `def` without a `@spec` is a hidden interface.
+1. **ALWAYS use `@spec` on every public function — including `@impl` callback implementations.** `@impl true` links to the behaviour's callback spec for Dialyzer, but does NOT substitute for an explicit `@spec` on the implementation. Two reasons: (a) ExDoc surfaces the implementation's `@spec`, not the behaviour's, on the module's page; (b) it's immediately visible when reading the implementation.
 2. **ALWAYS use `@moduledoc`** on every module — even `@moduledoc false` is better than nothing.
 3. **ALWAYS use `@doc`** on every public function. Use `@doc false` for intentionally undocumented internals.
 4. **ALWAYS pair `@spec` with the function it describes** — immediately above, no blank line between.
@@ -179,6 +179,28 @@ def find_user(id), do: ...
 @spec parse_status(String.t()) :: {:ok, :active | :inactive | :pending} | {:error, :invalid}
 def parse_status(str), do: ...
 ```
+
+#### Variants without a payload — prefer bare atoms over `{:tag, nil}`
+
+When designing a sum type, variants that carry no data should be bare atoms, not tagged tuples with a `nil` payload:
+
+```elixir
+# BAD — junk `nil` slot on the payload-less variants
+@type type_spec ::
+        {:boolean, nil}
+        | {:integer, Range.t()}
+        | {:atom, nil}
+        | {:binary, Range.t()}
+
+# GOOD — bare atoms for payload-less variants
+@type type_spec ::
+        :boolean
+        | :atom
+        | {:integer, Range.t()}
+        | {:binary, Range.t()}
+```
+
+The `{:tag, nil}` form compiles but forces every caller and pattern match to spell out `{:boolean, nil}` and `{:atom, nil}` — more noise, no information.
 
 ### With `when` (type variables)
 

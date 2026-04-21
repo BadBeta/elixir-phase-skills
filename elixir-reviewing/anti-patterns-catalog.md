@@ -837,6 +837,106 @@ def handle_request(_), do: :persistent_term.get({MyApp, :timeout})
 ```
 
 ---
+### D9. Behaviour callback overloaded with reflection atom
+
+**Why it's bad:** Dispatch callbacks that accept a meta-atom like `:list_instructions`, `:describe`, or `:capabilities` couple reflection to data validation. Callers pass dummy data just to ask "what can you do?"; tests need "valid pairs" maps to exercise the reflection path; validation order becomes tricky.
+
+```elixir
+# BAD — dispatch + reflection on the same callback
+@callback execute(instruction :: atom(), a :: term(), b :: term()) ::
+            {:ok, {:result, term()}} | {:ok, {:instructions, [atom()]}}
+
+Mod.execute(:list_instructions, 0, 0)   # 0, 0 are dummies
+```
+
+```elixir
+# GOOD — reflection is its own callback
+@callback execute(instruction(), a(), b()) :: {:ok, output()}
+@callback instructions() :: [instruction(), ...]
+
+Mod.instructions()                      # reflection — pure, no args
+Mod.execute(:add, 2, 3)                 # dispatch — all args meaningful
+```
+
+See planning §4.9 Behaviour design.
+
+### D10. Compound error reasons squashing distinct failures
+
+**Why it's bad:** A single reason like `{:out_of_range_or_wrong_type, value}` merges two distinct failure modes. Consumers can't programmatically respond to just "out of range" vs "wrong type".
+
+```elixir
+# BAD — two failure modes, one reason
+defp validate(v) when is_integer(v) and v in 0..100, do: {:ok, v}
+defp validate(v), do: {:error, {:out_of_range_or_wrong_type, v}}
+```
+
+```elixir
+# GOOD — split, include the expected range on out-of-range
+defp validate(v) when is_integer(v) and v in 0..100, do: {:ok, v}
+defp validate(v) when is_integer(v), do: {:error, {:out_of_range, v, 0..100}}
+defp validate(v), do: {:error, {:wrong_type, v}}
+```
+
+### D11. Mixed error-signalling styles at the same boundary
+
+**Why it's bad:** When a public module uses `{:error, _}` tuples for some failures and raises for others, callers can't write uniform error handling.
+
+```elixir
+# BAD — facade mixes styles
+defmodule MyApp.Foo do
+  def describe(module) when module in @known, do: %{...}   # raises on unknown
+  def execute(module, ...) do
+    if module in @known, do: ..., else: {:error, :unknown_module}
+  end
+end
+```
+
+```elixir
+# GOOD — stdlib convention: safe name returns ok/error, ! variant raises
+defmodule MyApp.Foo do
+  def describe(module) do
+    if module in @known, do: {:ok, %{...}}, else: {:error, :unknown_module}
+  end
+
+  def describe!(module) do
+    case describe(module) do
+      {:ok, d} -> d
+      {:error, r} -> raise ArgumentError, "unknown: #{inspect(r)}"
+    end
+  end
+end
+```
+
+### D12. Validation order blocks legitimately-data-free operations
+
+**Why it's bad:** When a callback dispatches on a key + data, validating data BEFORE the key means reflection/meta operations are forced to accept dummy inputs.
+
+```elixir
+# BAD — :list_instructions requires valid a/b even though it ignores them
+def execute(instruction, a, b) do
+  with {:ok, a} <- validate_a(a),
+       {:ok, b} <- validate_b(b),
+       {:ok, i} <- validate_instruction(instruction) do
+    dispatch(i, a, b)
+  end
+end
+```
+
+```elixir
+# GOOD — gate by dispatch key first; reflection bypasses data validation
+def execute(instruction, a, b) do
+  with {:ok, i} <- validate_instruction(instruction),
+       {:ok, a} <- validate_a(a),
+       {:ok, b} <- validate_b(b) do
+    dispatch(i, a, b)
+  end
+end
+```
+
+Better still: promote reflection to its own function (see D9 above).
+
+---
+
 
 ## E. Testing Anti-Patterns
 

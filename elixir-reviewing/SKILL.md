@@ -277,6 +277,9 @@ Full reference: `elixir-planning` §14. Flag these if you see them in a diff.
 | Adding Oban / GenStage / event sourcing without a triggering problem | Use the simplest mechanism; escalate only when needed | Request-change | planning §9.9 |
 | Missing `@moduledoc` on a public module | Add `@moduledoc` or explicit `@moduledoc false` | Request-change | implementing §8.5 |
 | Missing `@spec` on a new public function | Add `@spec` | Request-change | implementing §6.10 |
+| `@impl true` implementation with no explicit `@spec` | Add `@spec` on the implementation too — `@impl` links to the behaviour spec but doesn't substitute | Suggest | implementing type-and-docs rule 1 |
+| Behaviour callback overloaded with a "reflection" atom (e.g. `execute(:list_instructions, a, b)`) | Give reflection its own callback (`instructions/0`, `describe/0`) | Request-change | planning §4.9 |
+| Union type variant with `{:tag, nil}` payload sentinel | Use bare atom: `:tag` — don't carry a nil payload | Nitpick | implementing type-and-docs §Union types |
 | New feature is a library candidate but uses `Application.compile_env` | For library code, use runtime `get_env` or config-via-args | Block (if library) | planning §10.3 |
 
 ### 7.2 Control flow review
@@ -341,6 +344,9 @@ Full reference: `elixir-implementing` §7.4, §8.1–§8.2.
 | `catch` for expected business failures | Return ok/error tuples | Request-change |
 | Missing `{:error, reason}` shape documentation in `@spec` | Tighten the `@spec` with concrete error types | Request-change |
 | Operation in Oban / webhook / event handler that's not idempotent | Make idempotent (see planning §7.3) | Block |
+| Compound error reason squashing distinct failures (e.g. `{:out_of_range_or_wrong_type, v}`) | Split into distinct tags: `{:wrong_type, v}` + `{:out_of_range, v, range}` | Request-change |
+| Public module mixes raise and `{:error, _}` for same failure class (e.g. `describe/1` raises but `execute/4` returns `{:error, _}`) | Pick one per boundary. Safe name returns ok/error; `!` variant raises | Request-change |
+| `with` chain validates data inputs before dispatch key, forcing dummy data for reflection calls | Validate dispatch key first; reflection paths then bypass data validation | Suggest |
 
 ### 7.6 Process / OTP review
 

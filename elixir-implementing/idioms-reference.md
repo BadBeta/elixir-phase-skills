@@ -1502,6 +1502,97 @@ rescue
 end
 ```
 
+### Distinct failure modes get distinct tags
+
+When a single slot can fail for multiple reasons, give each mode its own tag. Don't compress "wrong type" and "out of range" into a single compound reason — the caller needs to know which kind of failure happened to respond usefully.
+
+```elixir
+# BAD — one reason covering two unrelated failure modes
+defp validate_a(a) when is_integer(a) and a in 0..100, do: {:ok, a}
+defp validate_a(a), do: {:error, {:invalid_input, :a, {:out_of_range_or_wrong_type, a}}}
+
+# GOOD — split the failure space
+defp validate_a(a) when is_integer(a) and a in 0..100, do: {:ok, a}
+defp validate_a(a) when is_integer(a),
+  do: {:error, {:invalid_input, :a, {:out_of_range, a, 0..100}}}
+defp validate_a(a),
+  do: {:error, {:invalid_input, :a, {:wrong_type, a}}}
+```
+
+The GOOD version includes the expected range in the out-of-range error, and lets a caller render a type-error message differently from a range-error message.
+
+**Rule of thumb:** every distinct branch in your validation function should emit a distinct reason atom. If two branches would emit the same atom, they're probably one branch.
+
+### Consistent error style per module boundary
+
+Pick one error-signalling style at each public boundary and stick to it. Mixing raise + tagged-tuple within the same module's public surface confuses callers.
+
+```elixir
+# BAD — facade mixes raise and tagged-tuple
+defmodule Blackboxes do
+  def describe(module) when module in @boxes, do: %{...}  # raises FunctionClauseError otherwise
+
+  def execute(module, ...) do
+    if module in @boxes, do: module.execute(...), else: {:error, {:unknown_blackbox, module}}
+  end
+end
+
+# GOOD — uniform tagged-tuple on the "safe" names
+defmodule Blackboxes do
+  def describe(module) when is_atom(module) do
+    if module in @boxes, do: {:ok, %{...}}, else: {:error, {:unknown_blackbox, module}}
+  end
+
+  def describe!(module) do
+    case describe(module) do
+      {:ok, desc} -> desc
+      {:error, reason} -> raise ArgumentError, "unknown blackbox: #{inspect(module)}"
+    end
+  end
+
+  def execute(module, ...) do
+    if module in @boxes, do: module.execute(...), else: {:error, {:unknown_blackbox, module}}
+  end
+end
+```
+
+**Convention:** safe name returns `{:ok, _} | {:error, _}`; `!` variant raises on error. This matches the stdlib (`File.read`/`File.read!`, `Integer.parse`/`String.to_integer`, etc.).
+
+### Validation order in `with` chains — gate by dispatch key first
+
+When an operation has both a **dispatch key** (instruction, action, command name) and **data inputs**, validate the dispatch key FIRST. Reason: some dispatch values legitimately don't use the data (reflection, meta-operations). If you validate data first, you force those branches to accept dummy values just to pass validation.
+
+```elixir
+# BAD — data validated before instruction; instruction :list_instructions
+# rejects nil/invalid a/b even though it ignores them
+def execute(instruction, a, b) do
+  with {:ok, a} <- validate_a(a),
+       {:ok, b} <- validate_b(b),
+       {:ok, instruction} <- validate_instruction(instruction) do
+    dispatch(instruction, a, b)
+  end
+end
+
+# GOOD — dispatch key first; reflection paths are free of data validation
+def execute(instruction, a, b) do
+  with {:ok, instruction} <- validate_instruction(instruction),
+       {:ok, a} <- validate_a(a),
+       {:ok, b} <- validate_b(b) do
+    dispatch(instruction, a, b)
+  end
+end
+```
+
+**Even better:** if a dispatch value truly doesn't need data, promote it to its own function so the call site expresses the intent directly:
+
+```elixir
+# Cleanest — reflection is its own function; execute/3 never sees :list_instructions
+def instructions, do: @instructions
+def execute(instruction, a, b) when instruction != :list_instructions, do: ...
+```
+
+See `../elixir-planning/architecture-patterns.md §4.9` for the behaviour-design counterpart (don't overload dispatch with reflection atoms).
+
 ---
 
 ## Advanced Reduce Patterns
