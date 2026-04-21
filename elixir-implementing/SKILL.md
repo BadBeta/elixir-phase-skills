@@ -32,7 +32,7 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 
 | Subskill | Purpose | Load when writing... |
 |---|---|---|
-| [idioms-reference.md](idioms-reference.md) | Pattern matching (incl. pin operator advanced, `<>` prefix matching, multi-clause default args, assertive matching), guards, `with`, pipelines, `Enum`/`Stream`/`for`, captures | Daily Elixir code — idiomatic control flow and transforms |
+| [idioms-reference.md](idioms-reference.md) | Pattern matching (incl. pin operator advanced, `<>` prefix matching, multi-clause default args, assertive matching), guards, `case`/`cond`/`if`, `with` chains, pipelines, `for` comprehensions, captures, IO lists, error handling, **Enum** (common + 30+ functions), **Stream** (custom streams via `Stream.resource`/`transform`, Enum-vs-Stream decision), **advanced reduce** (`map_reduce`, `flat_map_reduce`, `scan`, multi-accumulator), **recursion** (TCO, accumulator-reverse, tree traversal, mutual), **Protocols** (`defprotocol`, `defimpl`, `@derive`, Enumerable/Collectable/Inspect patterns, consolidation), **Behaviours** (`@callback`/`@optional_callbacks`, `@impl`, `use` + `defoverridable`, Mox), **Imperative→Elixir translation** tables | Daily Elixir code — idiomatic control flow, transforms, polymorphism |
 | [data-reference.md](data-reference.md) | Maps, structs, keywords, tuples, lists, MapSet, binaries, IO lists — complexity table + call patterns | Anything touching data-structure manipulation |
 | [otp-callbacks.md](otp-callbacks.md) | GenServer/Task/Agent/`:gen_statem` callback templates, supervisor child specs, Registry via-tuples, ETS calls, **GenStage/Broadway/Flow templates** | GenServer/Task/supervisor/streaming code |
 | [ecto-patterns.md](ecto-patterns.md) | Schemas, changesets, queries, migrations, Multi, custom types, schemaless changesets | Any Ecto code — schema or query |
@@ -1154,6 +1154,8 @@ for type_expr <- args, var <- collect_vars(type_expr), uniq: true, do: var
 
 ### 5.5 Recursion — only when Enum/Stream/for don't fit
 
+> **Depth:** [idioms-reference.md](idioms-reference.md) §Recursion — tail-call optimization explained, accumulator-reverse pattern, body-vs-tail recursive trade-offs, early termination, tree/graph traversal, mutual recursion, recursion-vs-`reduce_while` decision, wrapping recursive walkers as lazy streams.
+
 **Use recursion only for:**
 
 - Early termination with complex conditions (`Enum.reduce_while` usually suffices)
@@ -1309,7 +1311,7 @@ Map.put(user, :nmae, "Jane")  # No error! Silently adds :nmae to the struct
 
 ## 6. Idiomatic Elixir Constructs — Depth Reference
 
-> **Depth:** For full syntax reference of pattern matching, guards, `with`, pipelines, `Enum`/`Stream`/`for`, captures — load [idioms-reference.md](idioms-reference.md). For data-structure specific patterns (maps/structs/keywords/tuples/binaries/IO lists) — load [data-reference.md](data-reference.md).
+> **Depth:** [idioms-reference.md](idioms-reference.md) — full syntax reference for pattern matching (incl. pin advanced, `<>` prefix matching, multi-clause default args, assertive matching), guards, `case`/`cond`/`if`, `with` chains, pipelines, `for` comprehensions, captures, IO lists, error handling, **Enum** (full function reference), **Stream** (custom streams), **Protocols**, **Behaviours**, **Recursion** (TCO), **advanced reduce**, and **Imperative→Elixir translation** tables. [data-reference.md](data-reference.md) — data-structure specific patterns (maps/structs/keywords/tuples/binaries/IO lists/MapSet/:queue).
 
 ### 6.1 if / unless — narrow, specific uses
 
@@ -1387,6 +1389,8 @@ end
 
 ### 6.4 Enum — the daily workhorses
 
+> **Depth:** [idioms-reference.md](idioms-reference.md) §Enum — full reference including `with_index`, `uniq_by`/`dedup`/`dedup_by`, `take_while`/`drop_while`/`take_every`, `chunk_by`/`chunk_while`, `min_by`/`max_by`/`min_max`, `find_index`/`find_value`, `reject`, `map_intersperse`, `zip_reduce`/`zip_with`, `slice`/`at`. Plus §Advanced Reduce Patterns — `map_reduce`, `flat_map_reduce`, `scan`, multi-accumulator, complex halt state, reducer decision table.
+
 ```elixir
 # Transform
 Enum.map(list, &process/1)                          # Transform each
@@ -1454,6 +1458,8 @@ Enum.into(new_pairs, existing_map, fn {k, v} -> {k, transform(v)} end)
 ```
 
 ### 6.5 Stream — when Enum is too eager
+
+> **Depth:** [idioms-reference.md](idioms-reference.md) §Stream — `Stream.transform` (stateful transformations), `Stream.resource` full walkthrough (paginated API, custom binary format), `Stream.flat_map`/`zip`/`concat`/`take_while`/`dedup`, Enum-vs-Stream benchmark guidance, building your own stream for a custom data source.
 
 ```elixir
 # Lazy chain — no work done until a terminal Enum call
@@ -2818,48 +2824,154 @@ end
 - Internal modules live in a subdirectory: `lib/my_app/catalog/product.ex`, `lib/my_app/catalog/price_calculator.ex`
 - Cross-context calls go through the context public API, never into internals
 
-### 10.2 Behaviour vs protocol — decision table
+### 10.2 Behaviour vs protocol — the polymorphism decision
 
-| Dispatch on | Use |
+Elixir has two polymorphism mechanisms. Elixir-wide rule: **default to a plain module** — introduce either mechanism only when a real second implementation or test double exists.
+
+> **Depth:** [idioms-reference.md](idioms-reference.md) §Protocols and §Behaviours — full templates including `@derive`, `@fallback_to_any`, `@undefined_impl_description`, `Enumerable`/`Collectable`/`Inspect` implementation patterns, `use` + `defoverridable`, Mox integration, consolidation, common anti-patterns. **Architectural decision** (behaviour design, contract evolution, protocol-on-struct strategy pattern): `../elixir-planning/architecture-patterns.md` §4.7–4.11.
+
+**Quick decision:**
+
+| When you need to... | Use |
 |---|---|
-| Module identity (chosen at config time: which mailer, which HTTP client?) | Behaviour |
-| Data type (polymorphic serialization, iteration, inspection) | Protocol |
-| Testable with Mox | Behaviour (Mox requires behaviour) |
-| One implementation chosen per environment | Behaviour + `Application.compile_env` |
-| Many implementations, auto-dispatch by struct type | Protocol (`@derive` friendly) |
+| Dispatch on **module identity** chosen at config time (which mailer, which HTTP client) | Behaviour |
+| Dispatch on **data type** (polymorphic serialization, iteration, inspection) | Protocol |
+| Testable with Mox | Behaviour (Mox requires a behaviour) |
+| Single implementation chosen per environment (test vs prod) | Behaviour + `Application.compile_env` |
+| Many implementations, auto-dispatched by struct type | Protocol (`@derive` friendly) |
+| Add behaviour to a type you don't own | Protocol (implement `defimpl` from your module) |
+| Runtime-pluggable per-entity behaviour (not per-env) | Protocol-on-struct (see planning §4.6) |
 
-**Behaviour pattern (external boundaries, test-swappable):**
+### 10.3 Behaviours — define, implement, test
+
+**Define the contract:**
 
 ```elixir
 defmodule MyApp.Mailer do
-  @callback send_welcome(User.t()) :: :ok | {:error, term()}
-end
+  @type result :: :ok | {:error, term()}
 
-defmodule MyApp.Mailer.Swoosh do
-  @behaviour MyApp.Mailer
-  @impl true
-  def send_welcome(user), do: # real impl
-end
+  @callback send_welcome(User.t()) :: result()
+  @callback send_reset(User.t(), token :: String.t()) :: result()
 
-# In config/{test,prod}.exs:
-config :my_app, :mailer, MyApp.Mailer.Mock     # test
-config :my_app, :mailer, MyApp.Mailer.Swoosh   # prod
+  @callback batch_send([User.t()]) :: result()
+  @optional_callbacks batch_send: 1
+end
 ```
 
-**Protocol pattern (type-polymorphic):**
+**Implement it:**
+
+```elixir
+defmodule MyApp.Mailer.Swoosh do
+  @behaviour MyApp.Mailer
+
+  @impl true
+  def send_welcome(user), do: # real Swoosh call
+  @impl true
+  def send_reset(user, token), do: # real Swoosh call
+end
+```
+
+**`@impl` is mandatory** — the compiler catches typos (`hanle_call` vs `handle_call`) and missing implementations at compile time.
+
+**Wire config — swap per environment:**
+
+```elixir
+# config/config.exs
+config :my_app, :mailer, MyApp.Mailer.Swoosh
+
+# config/test.exs
+config :my_app, :mailer, MyApp.Mailer.Mock     # Mox.defmock/2
+
+# Call site
+@mailer Application.compile_env!(:my_app, :mailer)
+def notify(user), do: @mailer.send_welcome(user)
+```
+
+**Testing with Mox:**
+
+```elixir
+# test/test_helper.exs
+Mox.defmock(MyApp.Mailer.Mock, for: MyApp.Mailer)
+
+# In a test
+expect(MyApp.Mailer.Mock, :send_welcome, fn %User{email: "a@b.c"} -> :ok end)
+assert :ok = MyApp.Onboarding.run(user)
+```
+
+**Defaults via `use`** when most implementations would share the same code:
+
+```elixir
+defmodule MyApp.Worker do
+  @callback perform(map()) :: :ok | {:error, term()}
+  @callback retry_delay(attempt :: non_neg_integer()) :: pos_integer()
+
+  defmacro __using__(_) do
+    quote do
+      @behaviour MyApp.Worker
+      @impl true
+      def retry_delay(attempt), do: trunc(:math.pow(2, attempt) * 1_000)
+      defoverridable retry_delay: 1
+    end
+  end
+end
+```
+
+### 10.4 Protocols — define, implement, derive
+
+**Define:**
 
 ```elixir
 defprotocol MyApp.Printable do
   @spec print(t()) :: iodata()
   def print(term)
 end
+```
 
-defimpl MyApp.Printable, for: MyApp.User do
-  def print(%{name: n, email: e}), do: [n, " <", e, ">"]
+**Implement for structs:**
+
+```elixir
+defmodule MyApp.User do
+  defstruct [:name, :email]
+
+  defimpl MyApp.Printable do
+    def print(%{name: n, email: e}), do: [n, " <", e, ">"]
+  end
 end
 ```
 
-### 10.3 Config strategy — when to use which
+**Implement for built-in types** (`Atom`, `BitString`, `Integer`, `List`, `Map`, `Tuple`, etc.):
+
+```elixir
+defimpl MyApp.Printable, for: BitString do
+  def print(s) when is_binary(s), do: s
+end
+
+defimpl MyApp.Printable, for: [Integer, Float] do
+  def print(n), do: to_string(n)
+end
+```
+
+**`@derive` — compile-time generated implementation:**
+
+```elixir
+defmodule MyApp.User do
+  # @derive MUST come BEFORE defstruct
+  @derive {Jason.Encoder, only: [:id, :name, :email]}    # selective JSON encoding
+  @derive {Inspect, only: [:id, :name]}                   # hide password from logs
+  defstruct [:id, :name, :email, :password_hash]
+end
+```
+
+For foreign structs you don't own:
+
+```elixir
+require Protocol
+Protocol.derive(Jason.Encoder, SomeLib.Thing, only: [:id])
+```
+
+**Anti-patterns:** `@derive` after `defstruct` (compiler warns, may not apply); `defimpl for: Map` expecting to match structs (structs dispatch separately); introducing a behaviour when a protocol fits (strategy-module is a behaviour; type-dispatch is a protocol).
+
+### 10.5 Config strategy — when to use which
 
 | Value | File | API |
 |---|---|---|
@@ -2881,7 +2993,7 @@ defmodule MyLib.Client do
 end
 ```
 
-### 10.4 Ecto — the implementation boundary
+### 10.6 Ecto — the implementation boundary
 
 **Never call `Repo` from a boundary layer (controller, LiveView, CLI). Always go through a context.**
 
@@ -2925,7 +3037,7 @@ defmodule MyApp.Catalog do
 end
 ```
 
-### 10.5 Struct vs map — decision table
+### 10.7 Struct vs map — decision table
 
 | When you have... | Use |
 |---|---|
@@ -2955,7 +3067,7 @@ defmodule MyApp.Settings do
 end
 ```
 
-### 10.6 Function placement — where does this code live?
+### 10.8 Function placement — where does this code live?
 
 | This function... | Belongs in |
 |---|---|
@@ -2967,7 +3079,7 @@ end
 | Is test-only | `test/support/*.ex` |
 | Is a DSL / macro | Separate module, well-documented, usually internal |
 
-### 10.7 File / module layout — canonical Phoenix-app example
+### 10.9 File / module layout — canonical Phoenix-app example
 
 ```
 lib/
@@ -3036,7 +3148,7 @@ This skill covers idiomatic Elixir writing. For domain-specific depth, load the 
 | Livebook notebooks (smart cells, Kino, VegaLite) | `livebook` |
 | Multi-node Elixir + microcontrollers (AtomVM, RPC bridges) | `erpc` |
 | TCP/UDP socket programming, protocol framing, binary protocols | For now, the `elixir` skill's `networking.md` file — `elixir-implementing` does not duplicate that content |
-| Ecto deep — custom types, CTEs, window functions, multi-tenancy | For now, the `elixir` skill's `ecto-*.md` files — covered here at §10.4 level for daily use |
+| Ecto deep — custom types, CTEs, window functions, multi-tenancy | For now, the `elixir` skill's `ecto-*.md` files — covered here at §10.6 level for daily use |
 
 **How to load:** mention the skill in a system reminder or invoke via the Skill tool. The trigger phrases in each skill's description auto-activate them.
 

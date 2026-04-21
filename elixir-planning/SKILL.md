@@ -363,6 +363,70 @@ Never upward. Never sideways (Interface → Infrastructure).
 - **Domain layer** contains contexts with entities (pure data + invariants) and use cases (orchestration). No framework references.
 - **Infrastructure layer** implements behaviours defined by domain. Each external dependency has an adapter.
 
+### 4.6 Polymorphism — Behaviours vs Protocols
+
+Elixir has **two** polymorphism mechanisms. Choosing the right one shapes every boundary in your system.
+
+> **Depth:** [architecture-patterns.md](architecture-patterns.md) §4.7–4.11 — full decision table, protocol-on-struct strategy pattern, behaviour design guidelines, contract evolution, "behaviour spam" anti-pattern. **Implementation templates** (`defprotocol`, `defimpl`, `@derive`, `@callback`, `@impl`, `use`/`defoverridable`, Mox): [../elixir-implementing/idioms-reference.md](../elixir-implementing/idioms-reference.md) §Protocols + §Behaviours.
+
+**The fundamental difference:**
+
+| Mechanism | Dispatches on | Swapped by | Example |
+|---|---|---|---|
+| **Behaviour** | The **module** the caller invokes | Config, explicit argument | `Plug`, `GenServer`, `MyApp.Storage` → `Redis` / `Mock` |
+| **Protocol** | The **data type** of the first argument | Adding a `defimpl` for a new type | `Enumerable`, `Jason.Encoder`, `String.Chars` |
+
+**Decision — which to use?**
+
+| When you need to… | Use | Why |
+|---|---|---|
+| Swap implementation per environment (real vs test) | **Behaviour** | Config chooses the module; Mox generates a test double |
+| Pluggable strategies / external adapters (hexagonal ports) | **Behaviour** | The strategy IS a module, not data |
+| Multiple data types share a method (`encode/1`, `render/1`) | **Protocol** | Dispatch comes from the value's type |
+| Extend a framework (implement `GenServer`, `Plug`, `Supervisor`) | **Behaviour** | Framework defines the contract |
+| Add support for a new type to an API you don't own | **Protocol** | `defimpl Jason.Encoder, for: MyStruct` without touching Jason |
+| Separate ports from adapters (hexagonal) | **Behaviour** | Port = behaviour, adapter = module implementing it |
+| Offer `@derive` on user structs | **Protocol** | Only protocols support `@derive` |
+| Runtime-pluggable behaviour per entity (not per env) | **Protocol on struct** (see below) | Each struct carries its own implementation |
+| Fail loudly when no implementation matches | **Protocol without fallback** | `Enumerable`, `Collectable` |
+| Single implementation today, "just in case" abstraction | **Neither — plain module** | Introduce when a real second implementation exists |
+
+**"Plain module" is the default.** Introducing either mechanism has costs (cognitive, consolidation, test fixtures). Add the indirection when a real second implementation or test double exists — not speculatively.
+
+**Protocol-on-struct — the strategy/plugin pattern (AshAuthentication):**
+
+When you want runtime-pluggable behaviour per entity (not per environment), neither plain behaviour nor plain protocol fits cleanly. The pattern: each strategy is a **struct**; a protocol is implemented for each strategy struct; the caller dispatches on the struct value.
+
+```elixir
+defprotocol MyApp.AuthStrategy do
+  def authenticate(strategy, credentials)
+end
+
+defmodule MyApp.Strategies.Password do
+  defstruct [:hash_algorithm, :min_length]
+  defimpl MyApp.AuthStrategy do
+    def authenticate(%{hash_algorithm: alg}, %{password: p}), do: ...
+  end
+end
+
+# Strategies are configured with their own state; dispatch on struct value
+for s <- Application.fetch_env!(:my_app, :strategies) do
+  MyApp.AuthStrategy.authenticate(s, creds)
+end
+```
+
+**Why this beats plain behaviour:** strategies can be configured with state (hash algorithm, OAuth credentials) that travels with the dispatch — no separate registry needed.
+**When to reach for it:** Ash extension systems, plugin architectures, per-tenant pluggable behaviour.
+
+**Behaviour design quick rules:**
+
+- **Narrow the surface** — the behaviour expresses what the *domain* needs, not what the library offers.
+- **Return domain types**, not library types — translate `%Stripe.Charge{}` to `%Payment{}` in the adapter.
+- **`@optional_callbacks` sparingly** — each one is a `function_exported?` check at the call site.
+- **Version via new modules**, not by adding required callbacks to existing behaviours (breaking change).
+
+See `architecture-patterns.md` §4.7–4.11 for the full treatment.
+
 ---
 
 ## 5. Project Layout
