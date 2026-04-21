@@ -231,6 +231,51 @@ end
 
 **Real-world pattern:** Phoenix controllers receive `%Plug.Conn{} = conn`, not `Map.get(conn, :assigns)`. Ecto changesets destructure as `%Changeset{valid?: true, changes: changes} = cs`. Assertive destructuring surfaces bugs early.
 
+### Membership and computed-value dispatch → multi-clause with guards
+
+When the branching decision is "is the argument in this set?" or "does this computed property hold?", multi-clause functions with guards read cleaner than `if ... in ... else` or `case computed() do`.
+
+**Membership:**
+
+```elixir
+@boxes [Blackboxes.Arithmetic, Blackboxes.Logic, Blackboxes.Comparison, Blackboxes.StringOps]
+
+# BAD — if/else on membership
+def execute(module, i, a, b) do
+  if module in @boxes do
+    module.execute(i, a, b)
+  else
+    {:error, {:unknown_blackbox, module}}
+  end
+end
+
+# GOOD — multi-clause with guard + catch-all
+def execute(module, i, a, b) when module in @boxes, do: module.execute(i, a, b)
+def execute(module, _i, _a, _b), do: {:error, {:unknown_blackbox, module}}
+```
+
+The guard version reads as a definition ("when the module is known"), exposes the branching logic in the function head (where pattern matching belongs), and avoids the nesting of `if/else`.
+
+**Computed value:**
+
+```elixir
+# BAD — case on a computed value
+defp validate(v) when is_binary(v) do
+  case byte_size(v) do
+    n when n <= @max -> {:ok, v}
+    n -> {:error, {:too_long, n}}
+  end
+end
+
+# GOOD — push the computation into a guard
+defp validate(v) when is_binary(v) and byte_size(v) <= @max, do: {:ok, v}
+defp validate(v) when is_binary(v), do: {:error, {:too_long, byte_size(v)}}
+```
+
+The guard form keeps the "happy path" first-line and eliminates the inner case scaffold.
+
+**When NOT to use multi-clause:** if the guard would be long or repeated across many branches, a `case` body with guards is clearer. But for 2-3 clauses with simple membership/computed-value tests, multi-clause wins.
+
 ---
 
 ## Guards

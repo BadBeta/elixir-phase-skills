@@ -108,6 +108,8 @@ This is the single most important section to consult at the moment of writing. E
 | When you need to... | Use this | NOT this |
 |---|---|---|
 | Branch on the *shape* of data (struct type, tuple tag, map keys) | Multi-clause function with pattern in head | `if is_struct(x, Mod)` / `case ... do` |
+| Branch on **membership** in a compile-time list/set | Multi-clause with `when x in @list` guard + catch-all | `if x in @list, do: yes(), else: no()` |
+| Branch on a **computed value** (size, length, type check) | Multi-clause with guard on the computation | `case byte_size(v) do n when ... -> ... end` |
 | Chain 2+ `{:ok, _}` / `{:error, _}` operations | `with ... do ... else ... end` | Nested `case`, nested `if` |
 | Handle a single ok/error result | `case ... do` | `with` with one clause, `if` |
 | Boolean side-effect, no value returned | `if cond, do: side_effect()` | `case bool do true -> ...; false -> ... end` |

@@ -280,6 +280,7 @@ Full reference: `elixir-planning` §14. Flag these if you see them in a diff.
 | `@impl true` implementation with no explicit `@spec` | Add `@spec` on the implementation too — `@impl` links to the behaviour spec but doesn't substitute | Suggest | implementing type-and-docs rule 1 |
 | Behaviour callback overloaded with a "reflection" atom (e.g. `execute(:list_instructions, a, b)`) | Give reflection its own callback (`instructions/0`, `describe/0`) | Request-change | planning §4.9 |
 | Union type variant with `{:tag, nil}` payload sentinel | Use bare atom: `:tag` — don't carry a nil payload | Nitpick | implementing type-and-docs §Union types |
+| Public `@spec` uses a loose type (`atom()`, `map()`, `[term()]`) where a named `@type` is already defined in scope | Reuse the named alias: `MyMod.instruction()`, `MyMod.t()`, `[MyMod.entry()]` | Suggest | implementing type-and-docs rule 7 |
 | New feature is a library candidate but uses `Application.compile_env` | For library code, use runtime `get_env` or config-via-args | Block (if library) | planning §10.3 |
 
 ### 7.2 Control flow review
@@ -389,6 +390,8 @@ Full reference: `elixir-implementing` §3–§4.
 | Factory creating hardcoded unique values | Use `sequence(:email, &"user-#{&1}@x.com")` | Request-change |
 | Test with 10+ lines of setup for a pure function test | The function needs a boundary — pure tests shouldn't need this much setup | Suggest (architectural) |
 | Test that "sometimes" fails | Never leave flaky tests — find the root cause | Block |
+| Parametrized test loop using `@attr bad` rebinding to smuggle the loop variable into each generated `test` | Use a single `test` with `for` loop inside the body (rich assertion messages), or `unquote(Macro.escape(bad))` in the test body (which IS inside a quote) | Suggest | implementing testing-patterns §Parametrized Tests |
+| Duplicated fixture data / lookup maps across multiple tests in the same file (e.g., same `valid_pairs = %{...}` copied into two tests) | Extract to a `@module_attribute` or a `setup` callback that returns it in the context | Suggest | implementing testing-patterns |
 
 ### 7.8 Security review
 

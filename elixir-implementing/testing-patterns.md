@@ -192,6 +192,69 @@ insert(:user, %{email: "known@example.com"})
 
 ExMachina bypasses changesets — use only if your data doesn't need validation to be realistic. Otherwise roll your own (above).
 
+### DRY for fixture data shared across tests
+
+When the same lookup table or fixture map appears in 2+ tests, extract it — don't inline the same `%{A => a, B => b, ...}` twice.
+
+```elixir
+# BAD — valid_pairs duplicated in two tests
+test "responds to :list_instructions regardless of inputs" do
+  valid_pairs = %{
+    Blackboxes.Arithmetic => {0, 0},
+    Blackboxes.Logic => {true, true},
+    # ...
+  }
+  for module <- Blackboxes.list() do
+    {a, b} = Map.fetch!(valid_pairs, module)
+    # ...
+  end
+end
+
+test "unknown instruction returns the instruction list" do
+  valid_pairs = %{                     # <-- duplicate!
+    Blackboxes.Arithmetic => {0, 0},
+    # ...
+  }
+  # ...
+end
+```
+
+**Pick one of:**
+
+```elixir
+# Option 1 — @module_attribute (compile-time, no per-test cost)
+@valid_pairs %{
+  Blackboxes.Arithmetic => {0, 0},
+  Blackboxes.Logic => {true, true},
+  Blackboxes.Comparison => {0, 0},
+  Blackboxes.StringOps => {"", ""}
+}
+
+test "responds to :list_instructions" do
+  for module <- Blackboxes.list() do
+    {a, b} = Map.fetch!(@valid_pairs, module)
+    # ...
+  end
+end
+
+# Option 2 — setup callback (context-friendly, supports per-case overrides)
+setup do
+  %{valid_pairs: %{Blackboxes.Arithmetic => {0, 0}, ...}}
+end
+
+test "responds to :list_instructions", %{valid_pairs: pairs} do
+  # ...
+end
+```
+
+**When to pick which:**
+
+| Situation | Use |
+|---|---|
+| Fixture is a constant lookup (same every test) | `@module_attribute` |
+| Fixture needs per-test customization or DB seeding | `setup` returning it in the context |
+| Fixture is expensive (network, file I/O) | `setup_all` — shared across tests in the module |
+
 ---
 
 ## Mox — External Boundary Mocking
