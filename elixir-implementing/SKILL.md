@@ -2717,6 +2717,29 @@ defmodule MyLib.Client do
 end
 ```
 
+**Default for app-owned config: `compile_env`.** Reach for `get_env` only when the value genuinely changes at runtime (an env var read via `runtime.exs`, a feature flag, a per-request override). Three reasons:
+
+1. **Dialyzer visibility** — `compile_env` embeds the concrete type; `get_env` returns `any()`.
+2. **Fail-fast misconfiguration** — a missing required key crashes at compile, not at first use.
+3. **Recompile trigger** — the compiler re-runs modules that depend on changed compile-env keys.
+
+```elixir
+# BAD — app-owned port read on every call, returns any()
+def bandit_config do
+  [plug: Router, ip: {127, 0, 0, 1}, port: Application.get_env(:my_app, :port, 4040)]
+end
+
+# GOOD — compile-time binding; value resolved once, recompile on change
+defmodule MyApp.Endpoint do
+  @port Application.compile_env(:my_app, :port, 4040)
+  def bandit_config, do: [plug: Router, ip: {127, 0, 0, 1}, port: @port]
+end
+
+# If the value MUST be runtime-settable (env var read at boot), read it in
+# runtime.exs and write to the app env there; the app-side code can still
+# be `compile_env` — it just picks up whatever runtime.exs set.
+```
+
 ### 10.6 Ecto — the implementation boundary
 
 **Never call `Repo` from a boundary layer (controller, LiveView, CLI). Always go through a context.**

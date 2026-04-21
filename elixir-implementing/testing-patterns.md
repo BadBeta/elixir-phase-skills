@@ -786,6 +786,25 @@ end
 **When to use properties:** for invariants (roundtrip, idempotence, commutativity), parsers, serializers, state machines.
 **When NOT to use:** for business rules specific to example inputs — example-based tests communicate intent better there.
 
+**Canonicalizers and validators are prime candidates.** Any function that classifies, normalizes, or validates untrusted input (Host-header parser, IP classifier, email validator, URL normalizer) should have property tests — example tables miss adversarial edge cases (port suffixes, case variants, Unicode homoglyphs, IPv4-mapped IPv6, trailing whitespace). The table is a floor; properties catch what the author didn't think of.
+
+```elixir
+# Example — property test on a Host-header classifier
+property "any loopback-class address passes HostGuard" do
+  check all ip <- loopback_ip_gen() do
+    host = :inet.ntoa(ip) |> to_string()
+    assert HostGuard.allowed_host?(host, ["localhost"])
+  end
+end
+
+property "any non-loopback routable address fails" do
+  check all ip <- public_ip_gen() do
+    host = :inet.ntoa(ip) |> to_string()
+    refute HostGuard.allowed_host?(host, ["localhost"])
+  end
+end
+```
+
 See `../elixir-planning/test-strategy.md` for the choice.
 
 ---

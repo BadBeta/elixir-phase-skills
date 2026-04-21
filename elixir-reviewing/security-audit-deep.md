@@ -351,6 +351,39 @@ if config_env() == :prod do
 end
 ```
 
+### Telemetry on security decisions
+
+Any plug or function that **denies** a request on security grounds (auth failure, IP allowlist, Host guard, rate limit, CSRF mismatch) should emit a `:telemetry` event. Operators want to alert on these, count them over time, and correlate spikes with attacks.
+
+```elixir
+# In a rejection path
+:telemetry.execute(
+  [:my_app, :auth, :rejected],
+  %{count: 1},
+  %{reason: :invalid_token, peer: :inet.ntoa(ip), path: conn.request_path}
+)
+```
+
+Event naming convention: `[:app_name, :subsystem, :decision]` where decision is `:allowed` / `:rejected` / `:throttled`. Measurements are counters or durations; metadata carries the contextual fields (peer IP, user, reason atom).
+
+### Structured logging on rejection events
+
+Log with **metadata**, not string interpolation. This lets structured log pipelines (Loki, Datadog, ELK) filter and alert by field.
+
+```elixir
+# BAD — concatenated, no filtering possible
+Logger.warning("rejecting non-loopback request from #{:inet.ntoa(ip)}")
+
+# GOOD — structured; event and peer are filterable fields
+Logger.warning("request rejected",
+  event: :non_loopback,
+  peer: :inet.ntoa(ip),
+  path: conn.request_path
+)
+```
+
+**Rule:** every rejection path should emit BOTH a telemetry event (for metrics/alerts) AND a structured Logger call (for forensic trails). The telemetry event is cheap and attachable anywhere; the log entry is the durable record.
+
 ---
 
 ## Crypto Pitfalls

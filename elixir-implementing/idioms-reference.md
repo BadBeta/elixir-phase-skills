@@ -1603,6 +1603,45 @@ end
 
 **Convention:** safe name returns `{:ok, _} | {:error, _}`; `!` variant raises on error. This matches the stdlib (`File.read`/`File.read!`, `Integer.parse`/`String.to_integer`, etc.).
 
+### Emit telemetry + structured logs on rejection paths
+
+Every security rejection (auth failure, IP allowlist denial, Host guard, rate limit, CSRF) should emit a `:telemetry` event AND a structured `Logger` call. Telemetry gives operators metrics + alerts; the log entry gives the forensic trail. Strings-with-interpolation in Logger don't let log pipelines filter — use metadata.
+
+```elixir
+# BAD — concatenated string; no queryable field
+def call(%Plug.Conn{remote_ip: ip} = conn, _opts) do
+  if loopback?(ip) do
+    conn
+  else
+    Logger.warning("rejecting from #{:inet.ntoa(ip)}")
+    conn |> send_resp(403, "Forbidden") |> halt()
+  end
+end
+
+# GOOD — telemetry + structured log with queryable metadata
+def call(%Plug.Conn{remote_ip: ip} = conn, _opts) do
+  if loopback?(ip) do
+    conn
+  else
+    :telemetry.execute(
+      [:my_app, :request, :rejected],
+      %{count: 1},
+      %{reason: :non_loopback, peer: :inet.ntoa(ip), path: conn.request_path}
+    )
+
+    Logger.warning("request rejected",
+      event: :non_loopback,
+      peer: :inet.ntoa(ip),
+      path: conn.request_path
+    )
+
+    conn |> send_resp(403, "Forbidden") |> halt()
+  end
+end
+```
+
+Event-naming convention: `[:app_name, :subsystem, :decision]` where decision is `:allowed` / `:rejected` / `:throttled`. Keep the measurement map small (counters, durations) and put context in metadata.
+
 ### Validation order in `with` chains — gate by dispatch key first
 
 When an operation has both a **dispatch key** (instruction, action, command name) and **data inputs**, validate the dispatch key FIRST. Reason: some dispatch values legitimately don't use the data (reflection, meta-operations). If you validate data first, you force those branches to accept dummy values just to pass validation.

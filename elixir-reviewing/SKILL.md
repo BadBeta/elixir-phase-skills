@@ -281,6 +281,8 @@ Full reference: `elixir-planning` §14. Flag these if you see them in a diff.
 | Behaviour callback overloaded with a "reflection" atom (e.g. `execute(:list_instructions, a, b)`) | Give reflection its own callback (`instructions/0`, `describe/0`) | Request-change | planning §4.9 |
 | Union type variant with `{:tag, nil}` payload sentinel | Use bare atom: `:tag` — don't carry a nil payload | Nitpick | implementing type-and-docs §Union types |
 | Public `@spec` uses a loose type (`atom()`, `map()`, `[term()]`) where a named `@type` is already defined in scope | Reuse the named alias: `MyMod.instruction()`, `MyMod.t()`, `[MyMod.entry()]` | Suggest | implementing type-and-docs rule 7 |
+| `@moduledoc` / `@doc` asserts a behaviour (binds to both X and Y, rejects Z, accepts ranges A..B) not exercised by a test | Add a test that pins the claim, OR update the doc to match the code. Stale docs mislead worse than missing docs do | Request-change | implementing type-and-docs rule 13 |
+| Plug's `init/1` / `call/2` uses `Plug.opts()` when the plug actually accepts specific keys | Define a narrow `@type opts :: [...]` and use it in both specs | Suggest | implementing type-and-docs §Plug signature |
 | New feature is a library candidate but uses `Application.compile_env` | For library code, use runtime `get_env` or config-via-args | Block (if library) | planning §10.3 |
 
 ### 7.2 Control flow review
@@ -391,6 +393,7 @@ Full reference: `elixir-implementing` §3–§4.
 | Test with 10+ lines of setup for a pure function test | The function needs a boundary — pure tests shouldn't need this much setup | Suggest (architectural) |
 | Test that "sometimes" fails | Never leave flaky tests — find the root cause | Block |
 | Parametrized test loop using `@attr bad` rebinding to smuggle the loop variable into each generated `test` | Use a single `test` with `for` loop inside the body (rich assertion messages), or `unquote(Macro.escape(bad))` in the test body (which IS inside a quote) | Suggest | implementing testing-patterns §Parametrized Tests |
+| Canonicalizer / validator / parser function with only example-based tests | Add StreamData property tests. Tables miss adversarial edge cases — port suffixes, case variants, IPv4-mapped IPv6, trailing whitespace, Unicode homoglyphs | Suggest | implementing testing-patterns §Property-Based |
 | Duplicated fixture data / lookup maps across multiple tests in the same file (e.g., same `valid_pairs = %{...}` copied into two tests) | Extract to a `@module_attribute` or a `setup` callback that returns it in the context | Suggest | implementing testing-patterns |
 
 ### 7.8 Security review
@@ -443,6 +446,7 @@ Full reference: `elixir-implementing` §8.6, `elixir-planning` §10.
 | `Application.compile_env` in a library | Runtime `get_env` or accept config via options | Block (if library) |
 | Missing default in `Application.get_env(:app, :key)` | Provide default (`get_env(:app, :key, default)`), or use `fetch_env!` if required | Request-change |
 | Config value read on every call (hot path) | Cache in module attribute (app), `:persistent_term` (library hot path), or `Application.compile_env` (app) | Suggest |
+| Application code uses `Application.get_env` for a value that's set once at boot and never changes | Switch to `Application.compile_env` — Dialyzer sees the concrete type, missing-key crashes at compile, recompile triggers on config change | Suggest | implementing §10.5 |
 | Hardcoded URLs / credentials / secrets | Move to config + env var | Block |
 | Test config imported into runtime code | Keep `config/test.exs` isolated; production should never import test config | Block |
 

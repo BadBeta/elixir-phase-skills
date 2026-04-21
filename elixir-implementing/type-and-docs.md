@@ -20,6 +20,7 @@ Phase-focused on **writing** `@spec`, `@type`, `@doc`, `@moduledoc`, doctests, a
 10. **ALWAYS write doctests** for pure functions with no I/O. They serve as executable examples in `@doc`.
 11. **NEVER put sensitive data in `@doc`/`@moduledoc` examples.** These end up in HexDocs.
 12. **ALWAYS run `mix dialyzer`** in CI for projects with established specs. A warning means the spec doesn't match the code.
+13. **Documentation claims MUST match the code.** If `@moduledoc` or `@doc` asserts a behaviour ("binds to both IPv4 and IPv6 loopback", "accepts POST with JSON body", "raises on invalid input"), there must be code that implements it AND a test that exercises it. Stale claims are worse than missing docs — they mislead readers who trust the doc. Treat moduledoc promises as test targets: every non-obvious claim → a named test that asserts it.
 
 ---
 
@@ -260,17 +261,32 @@ def init(opts), do: ...
 def handle_call(:status, _from, state), do: ...
 ```
 
-### Plug signature
+### Plug signature — prefer a typed `opts`
+
+The `Plug` behaviour's default callback type for `init/1` is `Plug.opts()`, which is effectively `any()`. When a plug has specific option keys, define a narrow `@type opts` and use it — this surfaces the allowed keys in ExDoc and lets Dialyzer check callers.
 
 ```elixir
+# OK — too loose; callers guess what goes in opts
 @impl true
 @spec init(keyword()) :: keyword()
 def init(opts), do: opts
 
-@impl true
-@spec call(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+# GOOD — narrow opts; the legal shape is documented in code
+@type opts :: [allowed_hosts: [String.t()], strict: boolean()]
+
+@impl Plug
+@spec init(opts()) :: opts()
+def init(opts) do
+  allowed = Keyword.get(opts, :allowed_hosts, @default_hosts)
+  Keyword.put(opts, :allowed_hosts, allowed)
+end
+
+@impl Plug
+@spec call(Plug.Conn.t(), opts()) :: Plug.Conn.t()
 def call(conn, opts), do: ...
 ```
+
+**When the plug takes no options**, use `Plug.opts()` unchanged — no need to invent a type.
 
 ---
 
