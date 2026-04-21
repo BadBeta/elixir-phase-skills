@@ -324,10 +324,16 @@ config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key"]
 # BAD
 Logger.info("User logged in: #{inspect(user)}")    # user may include hashed_password
 
-# GOOD
+# GOOD — log only the fields you need
 Logger.info("User logged in: #{user.email}")
-# OR use redact-aware inspect
-Logger.info("User: #{inspect(user, custom_options: [redact: true])}")
+
+# GOOD — struct-level redaction via @derive Inspect (inspect/2 honors it)
+defmodule User do
+  @derive {Inspect, except: [:hashed_password, :api_key]}
+  defstruct [:email, :name, :hashed_password, :api_key]
+end
+# Logger.info("User: #{inspect(%User{...})}")
+# → %User{email: "...", name: "...", hashed_password: #Inspect.Opaque<...>}
 ```
 
 ### Environment variables
@@ -363,7 +369,7 @@ end
 | Random URL-safe token | `:crypto.strong_rand_bytes(32) \|> Base.url_encode64(padding: false)` | `System.unique_integer()` |
 | Key agreement (ECDH) | `:crypto.generate_key(:ecdh, :x25519)` + `:crypto.compute_key(:ecdh, ...)` | Roll-your-own DH |
 | Derive a key from a password | `:crypto.pbkdf2_hmac(:sha256, pwd, salt, iters, len)` or `Argon2` | Raw hash of password |
-| Derive multiple keys from one master key | HKDF: `:hkdf_erlang` / `:crypto.hkdf/5` (OTP 25+) | Concatenating SHA outputs |
+| Derive multiple keys from one master key | HKDF via `hkdf_erlang` / `ex_hkdf` libraries, or hand-rolled HKDF-Expand using `:crypto.mac/4` (HMAC-SHA256) | Concatenating SHA outputs |
 | Constant-time equality (token / HMAC compare) | `Plug.Crypto.secure_compare/2` | `==` (timing attack) |
 
 **Rules of thumb:**
@@ -420,8 +426,15 @@ shared_a = :crypto.compute_key(:ecdh, bob_pub, alice_priv, :x25519)
 shared_b = :crypto.compute_key(:ecdh, alice_pub, bob_priv, :x25519)
 # shared_a == shared_b
 
-# Derive a usable key via HKDF
-key = :crypto.hkdf(:sha256, shared_a, "salt", "my-app-v1", 32)
+# Derive a usable key via HKDF — Erlang's :crypto has no built-in HKDF;
+# use the `hkdf_erlang` hex package, or hand-roll HKDF-Expand with HMAC-SHA256:
+key = hkdf_expand(shared_a, "my-app-v1", 32)
+
+defp hkdf_expand(prk, info, len) do
+  # RFC 5869 HKDF-Expand (simplified — omits the Extract step for ECDH output)
+  :crypto.mac(:hmac, :sha256, prk, info <> <<1>>)
+  |> binary_part(0, len)
+end
 ```
 
 ### Key derivation (PBKDF2 — legacy; prefer Argon2)

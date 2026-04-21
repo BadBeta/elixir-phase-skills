@@ -18,7 +18,7 @@ Phase-focused on **writing** Ecto code. Covers schemas, changesets, queries, mig
 8. **NEVER preload inside a `for` loop** (N+1). Preload at the query level or via `Repo.preload/2` after loading the parent list.
 9. **ALWAYS use `Ecto.Multi` when multiple writes must succeed or fail together.** Never call `Repo.insert` + `Repo.update` back-to-back and hope.
 10. **NEVER write migrations that do destructive + non-destructive work in the same migration** — split into: (1) additive change + backfill, (2) cut-over code, (3) remove old column/table. See migration patterns below.
-11. **ALWAYS use `Repo.transaction/1` with isolation level explicit** when reading-then-writing (`Repo.transaction(fn -> ... end, isolation: :serializable)` or equivalent multi).
+11. **ALWAYS set isolation level explicitly** when reading-then-writing — Ecto's Postgres adapter uses `isolation_level:` (e.g. `Repo.transaction(fn -> ... end, isolation_level: :serializable)`).
 12. **NEVER return `Ecto.Query` from a context function.** The context returns data (structs, lists, tuples) — queries are internal. If a caller needs composition, export the narrow composition function.
 
 ---

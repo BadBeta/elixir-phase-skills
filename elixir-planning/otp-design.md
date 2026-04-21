@@ -380,7 +380,7 @@ defp config, do: :persistent_term.get({MyApp, :config})
 
 def call_api(data) do
   config = config()
-  HTTPoison.post(config.url, data, receive_timeout: config.timeout_ms)
+  Req.post!(config.url, json: data, receive_timeout: config.timeout_ms)
 end
 ```
 

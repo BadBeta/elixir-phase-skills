@@ -2356,104 +2356,26 @@ users_with_orders = MyApp.Orders.list_users_with_orders(user_ids)
 
 ## 15. Distributed Architecture — Mostly Don't
 
-### 15.1 What changes in distribution
+> **Depth:** [distributed-elixir.md](distributed-elixir.md) — full coverage including node topology, cross-node communication (`:erpc`, `:pg`, `Phoenix.PubSub`), distributed registries (`:global`, Horde, Syn), state distribution patterns (owner-based, replicated/CRDT, sharded, external store), partition handling and netsplit strategies, `libcluster` cluster formation, observability, decision framework, and distribution anti-patterns.
 
-| Single-node assumption | Distributed reality |
-|---|---|
-| Function calls always succeed | Network calls can fail, timeout, partition |
-| Process state always available | Process may be on another node |
-| PubSub is instant and reliable | Messages can be delayed, duplicated, lost |
-| ETS shared across the app | ETS is local to each node |
-| Registry finds processes instantly | Need distributed registry (`:global`, Horde, Syn) |
-| One supervision tree | One tree per node, coordination across trees |
+**The one rule that matters:** most Elixir apps don't need distribution. Exhaust single-node options first.
 
-### 15.2 Before distributing — exhaust single-node options
-
-| Problem | Single-node solution | Distribute only when |
+| Problem | Single-node solution | Distribute only when… |
 |---|---|---|
-| More throughput | `Task.async_stream`, Broadway, more cores | Single machine maxed out |
-| High availability | Supervisor restarts, health checks | Need zero-downtime deploys |
-| Data locality | ETS caching, read replicas | Data must be near users geographically |
-| Background jobs | Oban (shares PostgreSQL) | Need to spread CPU-heavy work |
-| WebSocket scale | Single node handles ~1M connections | More connections than one machine can serve |
+| More throughput | `Task.async_stream`, Broadway, more cores | One machine maxed out |
+| High availability | Supervisor restarts + blue/green deploy | Zero-downtime across regions required |
+| Data locality | ETS caching, read replicas | Users in multiple regions |
+| Background jobs | Oban (shares Postgres) | CPU-heavy work exceeds one node |
+| WebSocket scale | Single node handles ~1M | More concurrent connections than one machine |
 
-**Default to single node.** Distribution adds network partitions, split-brain scenarios, and eventual consistency. Avoid until genuinely needed.
+**When to distribute** — at least two of these must be true:
+1. Single-node CPU / memory / IO is saturated.
+2. Zero-downtime rolling deploys that survive single-node loss are required.
+3. Geographic distribution needed (data locality).
+4. State naturally partitions and doesn't fit on one node.
+5. HA required for persistent in-memory state (presence, game state).
 
-### 15.3 Distributed communication patterns
-
-```elixir
-# :erpc — synchronous call to remote node (OTP 23+)
-case :erpc.call(:"worker@host", MyApp.Heavy, :compute, [data], 30_000) do
-  result -> {:ok, result}
-rescue
-  e -> {:error, e}
-end
-
-# :pg — distributed process groups (OTP 23+), auto propagates across connected nodes
-:pg.join(:my_scope, :workers, self())
-:pg.get_members(:my_scope, :workers)    # Pids from ALL nodes
-
-# Phoenix.PubSub — distributed by default in a cluster (uses :pg)
-Phoenix.PubSub.broadcast(MyApp.PubSub, "events", {:update, data})
-
-# Distributed Registry options:
-# - Horde        — CRDT-based, eventually consistent
-# - Syn          — global registry with metadata
-# - :global      — built-in, uses global lock (NOT for high frequency)
-```
-
-### 15.4 Architectural decisions for distribution
-
-**State ownership — who holds the truth?**
-
-```
-Where does authoritative state live?
-├── Database (PostgreSQL, EventStore)  → Safest; use for persistent state
-├── Single designated node             → :global or Horde to register owner
-├── Replicated across nodes            → CRDTs (Horde, DeltaCrdt) for convergence
-├── Local to each node                 → ETS cache, eventually consistent is OK
-└── No shared state                    → Stateless workers, load balance freely
-```
-
-**When you must partition:**
-
-- **Consistent hashing** — route entities to specific nodes by key (e.g., `game_id mod N`)
-- **Leader election** — one node coordinates (use `:global` registration)
-- **CRDTs** — each node modifies independently, state converges (Horde, DeltaCrdt)
-
-### 15.5 Distribution anti-patterns
-
-```elixir
-# BAD — assuming remote calls always succeed
-result = GenServer.call({MyServer, :"remote@host"}, :work)
-
-# GOOD — handle node-down and timeout
-try do
-  GenServer.call({MyServer, :"remote@host"}, :work, 10_000)
-catch
-  :exit, {:noproc, _} -> {:error, :not_running}
-  :exit, {{:nodedown, _}, _} -> {:error, :node_down}
-  :exit, {:timeout, _} -> {:error, :timeout}
-end
-```
-
-```elixir
-# BAD — cluster-wide state in a single GenServer (bottleneck + SPOF)
-# One node owns it; everyone else does cross-node calls.
-
-# GOOD — local ETS cache per node, refreshed via PubSub or periodic sync
-# Each node reads locally; writes propagate asynchronously.
-```
-
-```elixir
-# BAD — :global for frequently accessed registrations (global lock = contention)
-
-# GOOD — Horde or :pg for high-frequency distributed lookup
-```
-
-### 15.6 Cross-Elixir communication — `erpc` skill
-
-For deep distributed patterns (AtomVM, custom protocols, Phoenix telemetry bridges), load the **`erpc`** skill.
+If fewer than two apply, don't distribute. Revisit in 6 months. See `distributed-elixir.md` for the full framework, communication patterns, and netsplit strategies.
 
 ---
 

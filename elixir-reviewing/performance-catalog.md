@@ -213,7 +213,10 @@ urls
     timeout: 10_000,
     on_timeout: :kill_task,
     ordered: false)
-|> Enum.reduce([], fn {:ok, r}, acc -> [r | acc]; _, acc -> acc end)
+|> Enum.reduce([], fn
+  {:ok, r}, acc -> [r | acc]
+  _, acc -> acc
+end)
 ```
 
 ---
@@ -229,7 +232,7 @@ urls
 def handle_info(:tick, state) do
   Process.sleep(10_000)
   work()
-  Process.send(self(), :tick, ...)
+  send(self(), :tick)
   {:noreply, state}
 end
 

@@ -1339,54 +1339,31 @@ Map.put(user, :nmae, "Jane")  # No error! Silently adds :nmae to the struct
 
 ---
 
-## 6. Idiomatic Elixir Constructs — Depth Reference
+## 6. Idiomatic Elixir Constructs
 
-> **Depth:** [idioms-reference.md](idioms-reference.md) — full syntax reference for pattern matching (incl. pin advanced, `<>` prefix matching, multi-clause default args, assertive matching), guards, `case`/`cond`/`if`, `with` chains, pipelines, `for` comprehensions, captures, IO lists, error handling, **Enum** (full function reference), **Stream** (custom streams), **Protocols**, **Behaviours**, **Recursion** (TCO), **advanced reduce**, and **Imperative→Elixir translation** tables. [data-reference.md](data-reference.md) — data-structure specific patterns (maps/structs/keywords/tuples/binaries/IO lists/MapSet/:queue).
+> **Depth:** [idioms-reference.md](idioms-reference.md) has full syntax reference + examples for every construct below. This section is an index — load the subskill for templates.
 
-### 6.1 if / unless — narrow, specific uses
+| Construct | When | Depth |
+|---|---|---|
+| `if` / `unless` | Boolean guard with side effect, no else value | idioms §`case`/`cond`/`if` |
+| `case` | Dispatch on one value's shape; can pipe into at end of multi-step pipeline | idioms §`case`/`cond`/`if` |
+| `cond` | Multiple independent booleans, no single subject | idioms §`case`/`cond`/`if` |
+| `with` | Chain 2+ ok/error steps — BUT note `with ... else` breaks LCO | idioms §`with` Chains |
+| Multi-clause function | Dispatch on argument shape/type | idioms §Pattern Matching in Function Heads |
+| Guards | Constrain function head; custom via `defguard` | idioms §Guards |
+| `Enum` | Bounded collection transformations — see function reference | idioms §`Enum` |
+| `Stream` | Lazy / I/O-sourced / infinite / stop-early | idioms §`Stream` |
+| `for` comprehension | Filter + transform in one pass; `into:`, `reduce:`, `uniq:`, binary | idioms §`for` Comprehensions |
+| `&` capture | Function reference when arity matches | idioms §Captures |
+| Recursion | Long-running loops, trees, binary decoders, state machines | idioms §Recursion |
+| Protocols | Dispatch on data type | idioms §Protocols |
+| Behaviours | Dispatch on module identity (swap at config time) | idioms §Behaviours |
 
-```elixir
-# Use `if` for: simple boolean guard, side-effect only, no else value
-if Logger.level_allowed?(:debug) do
-  Logger.debug("...")
-end
+### Three templates worth keeping inline
 
-# Use `if ... do ... else ...` cautiously — often a sign you want case or multi-clause
-# ACCEPTABLE when both branches are short and there's no dispatch on value shape
-assigns = if connected?(socket), do: assign(socket, :online, true), else: socket
-
-# PREFER case when returning values (strict boolean, not truthy)
-case Application.get_env(:my_app, :flag) do
-  true -> do_thing()
-  false -> skip()
-end
-
-# AVOID `unless` with else — negative logic is hard to read
-# BAD:
-unless x, do: a(), else: b()
-# GOOD:
-if x, do: b(), else: a()
-```
-
-### 6.2 case
+**Piping into `case` (end of multi-step pipeline only):**
 
 ```elixir
-# Single value, multiple possible shapes
-case Repo.get(User, id) do
-  nil -> {:error, :not_found}
-  %User{active: true} = user -> {:ok, user}
-  %User{} -> {:error, :inactive}
-end
-
-# Guards in case clauses
-case n do
-  n when is_integer(n) and n > 0 -> :positive
-  n when is_integer(n) -> :non_positive
-  f when is_float(f) -> :float
-  _ -> :other
-end
-
-# Piping into case at the end of a multi-step pipeline (acceptable)
 resource
 |> lookup_transitions(action_name)
 |> Enum.find(&match_transition?(&1, state, target))
@@ -1396,309 +1373,24 @@ resource
 end
 ```
 
-### 6.3 cond — for range/threshold logic
+**`cond` with binding in condition (priority resolution):**
 
 ```elixir
-# Use cond when: multiple independent booleans, no single subject to case on
-cond do
-  time > 1_000_000_000 -> "#{div(time, 1_000_000_000)}s"
-  time > 1_000_000 -> "#{div(time, 1_000_000)}ms"
-  time > 1_000 -> "#{div(time, 1_000)}μs"
-  true -> "#{time}ns"
-end
-
-# Priority resolution with variable binding in conditions
 cond do
   val = Map.get(overrides, key) -> val
   val = Map.get(config, key) -> val
   true -> default
 end
-
-# ALWAYS end with `true -> ...` unless you want CondClauseError on fall-through
 ```
 
-### 6.4 Enum — the daily workhorses
-
-> **Depth:** [idioms-reference.md](idioms-reference.md) §Enum — full reference including `with_index`, `uniq_by`/`dedup`/`dedup_by`, `take_while`/`drop_while`/`take_every`, `chunk_by`/`chunk_while`, `min_by`/`max_by`/`min_max`, `find_index`/`find_value`, `reject`, `map_intersperse`, `zip_reduce`/`zip_with`, `slice`/`at`. Plus §Advanced Reduce Patterns — `map_reduce`, `flat_map_reduce`, `scan`, multi-accumulator, complex halt state, reducer decision table.
+**Keyword options + validation:**
 
 ```elixir
-# Transform
-Enum.map(list, &process/1)                          # Transform each
-Enum.flat_map(list, &expand/1)                      # Map then flatten one level
-
-# Filter
-Enum.filter(list, & &1.active?)                     # Keep truthy
-Enum.reject(list, & &1.deleted?)                    # Drop truthy
-Enum.split_with(list, & &1.admin?)                  # {matching, rest} in one pass
-
-# Reduce
-Enum.reduce(list, 0, fn n, acc -> acc + n end)      # Fold
-Enum.reduce_while(list, acc, fn item, acc ->        # Early exit
-  case check(item) do
-    {:ok, v} -> {:cont, [v | acc]}
-    {:error, _} = e -> {:halt, e}
-  end
-end)
-Enum.map_reduce(list, 0, fn x, id ->                # Map + thread accumulator
-  {%{id: id, value: x}, id + 1}
-end)
-
-# Search
-Enum.find(list, & &1.primary?)                      # First match or nil
-Enum.find_index(list, & &1.admin?)                  # Index of first match
-Enum.find_value(list, &parse_if_valid/1)            # First non-falsy return
-Enum.any?(list, & &1.urgent?)                       # At least one
-Enum.all?(list, & &1.valid?)                        # Every one
-
-# Group / sort / dedupe
-Enum.group_by(list, & &1.category)                  # %{k => [items]}
-Enum.sort_by(list, & &1.priority, :desc)            # Sort by derived key
-Enum.uniq_by(list, & &1.id)                         # Dedupe by key function
-Enum.frequencies(list)                              # %{elem => count}
-Enum.frequencies_by(list, & &1.tag)                 # By key function
-
-# Slicing / chunking
-Enum.take(list, 10)                                 # First 10
-Enum.drop(list, 10)                                 # Skip first 10
-Enum.chunk_every(list, 3)                           # Groups of 3
-Enum.chunk_by(list, & &1.day)                       # Groups by consecutive key
-
-# Indexed / zipped
-Enum.with_index(list)                               # [{elem, 0}, {elem, 1}, ...]
-Enum.with_index(list, fn el, i -> {i, el} end)      # Custom transform per pair
-Enum.zip(list_a, list_b)                            # [{a1, b1}, {a2, b2}, ...]
-Enum.zip_with([list_a, list_b], &my_combine/1)      # Combine corresponding items
-
-# Terminal
-Enum.sum(list)
-Enum.min_by(list, & &1.price)
-Enum.max_by(list, & &1.score)
-Enum.to_list(enum)                                  # Force evaluation (for streams)
-Enum.into(list, %{}, fn {k, v} -> {k, v * 2} end)   # Collect into target type
-```
-
-**Decision: `Enum.into/3` vs `Map.new/2`:**
-
-```elixir
-# PREFER Map.new/2 when building a NEW map from scratch
-Map.new(users, fn u -> {u.id, u} end)
-
-# USE Enum.into/3 when MERGING into an existing map
-Enum.into(new_pairs, existing_map, fn {k, v} -> {k, transform(v)} end)
-```
-
-### 6.5 Stream — when Enum is too eager
-
-> **Depth:** [idioms-reference.md](idioms-reference.md) §Stream — `Stream.transform` (stateful transformations), `Stream.resource` full walkthrough (paginated API, custom binary format), `Stream.flat_map`/`zip`/`concat`/`take_while`/`dedup`, Enum-vs-Stream benchmark guidance, building your own stream for a custom data source.
-
-```elixir
-# Lazy chain — no work done until a terminal Enum call
-"huge.csv"
-|> File.stream!()                          # Line stream
-|> Stream.map(&String.trim/1)
-|> Stream.reject(&(&1 == ""))
-|> Stream.map(&parse_row/1)
-|> Stream.take(1_000)
-|> Enum.to_list()                          # Terminal — triggers evaluation
-
-# Generators
-Stream.iterate(1, &(&1 * 2))               # Infinite — 1, 2, 4, 8, ...
-Stream.repeatedly(fn -> :rand.uniform() end)   # Infinite random
-Stream.cycle([:a, :b, :c])                 # Infinite repeat
-Stream.unfold(init, fn state -> {emit, next} or nil end)
-
-# Resource — acquire / generate / cleanup
-Stream.resource(
-  fn -> File.open!("data.txt") end,        # init
-  fn file ->
-    case IO.read(file, :line) do
-      :eof -> {:halt, file}
-      line -> {[line], file}
-    end
-  end,
-  &File.close/1                            # cleanup
-)
-```
-
-**Decision: Stream vs Enum:**
-
-| Situation | Use |
-|---|---|
-| Small / medium finite collection | `Enum.*` |
-| Large file, line-by-line | `Stream.*` + terminal `Enum` |
-| Infinite sequence | `Stream.*` |
-| Need only N results from a large input | `Stream.*` + `Enum.take(N)` |
-| Memoizing intermediate results | `Enum.*` (stream re-runs if consumed twice) |
-
-### 6.6 Map / Keyword / List / Tuple — data structure choice
-
-| Use case | Structure |
-|---|---|
-| Internal key-value, known keys at compile time | Struct |
-| Internal key-value, dynamic keys | Map with atom keys |
-| External data (JSON / form params) | Map with string keys |
-| Ordered collection | List |
-| Options argument to a function | Keyword list |
-| Fixed grouping of 2–4 values | Tuple |
-| Unique set | MapSet |
-| FIFO queue | `:queue` |
-
-```elixir
-# --- Map operations ---
-Map.get(map, :key)                         # nil if missing
-Map.get(map, :key, default)                # with default
-Map.fetch(map, :key)                       # {:ok, value} | :error
-Map.fetch!(map, :key)                      # value or KeyError
-Map.put(map, :key, value)                  # Set (create or overwrite)
-Map.update(map, :count, 0, & &1 + 1)       # Update with default
-Map.merge(a, b)                            # b wins on conflict
-Map.merge(a, b, fn _k, av, bv -> av + bv end)   # Custom merge
-Map.drop(map, [:k1, :k2])                  # Remove keys
-Map.take(map, [:k1, :k2])                  # Keep only these
-Map.keys(map) / Map.values(map)
-
-# --- Keyword operations ---
-kw = [limit: 10, offset: 0]                # Ordered, allows duplicate keys
-Keyword.get(kw, :limit, 20)
-Keyword.validate!(kw, [:limit, offset: 0]) # Raises on unknown keys
-Keyword.merge(kw1, kw2)
-Keyword.put_new(kw, :limit, 20)            # Only if not already set
-
-# --- List operations ---
-[head | tail] = [1, 2, 3]                  # Destructure
-[1, 2, 3] ++ [4, 5]                        # Concat (O(length of left))
-length(list)                               # O(n) — avoid on hot paths
-Enum.reverse(list)                         # O(n)
-
-# --- Tuple operations ---
-elem({:ok, value}, 1)                      # Positional access
-put_elem({:ok, 1}, 1, 2)                   # Returns new tuple
-```
-
-**Lookup decision — `map[key]` vs `Map.get/2` vs `Map.fetch/2`:**
-
-| Need | Use |
-|---|---|
-| Access, nil on missing (lenient) | `map[:key]` / `Map.get(map, :key)` |
-| Access with default | `Map.get(map, :key, default)` |
-| Distinguish missing-key from nil-value | `Map.fetch(map, :key)` → `{:ok, v}` / `:error` |
-| Assert key exists, raise otherwise | `Map.fetch!(map, :key)` or pattern match `%{key: v}` |
-
-### 6.7 String — the whole daily kit
-
-```elixir
-# Manipulation
-String.trim(s)                             # Strip whitespace both ends
-String.trim_leading(s, "prefix")
-String.trim_trailing(s, "suffix")
-String.downcase(s) / String.upcase(s)
-String.capitalize(s)                       # First char up, rest down
-String.replace(s, "old", "new")
-String.replace(s, ~r/\s+/, " ")            # Regex replace
-String.split(s, ",")                       # Default splits, strips empty
-String.split(s, ",", parts: 2)             # Limit splits
-String.split(s, ~r/\s+/)                   # By regex
-String.slice(s, 0, 10)                     # Substring
-
-# Inspection
-String.length(s)                           # Grapheme count (O(n), careful on hot paths)
-byte_size(s)                               # Byte count (O(1), what you usually want)
-String.contains?(s, "needle")
-String.starts_with?(s, "http")
-String.ends_with?(s, ".com")
-
-# Conversion
-String.to_integer(s)                       # Raises on bad input
-Integer.parse(s)                           # {int, rest} or :error
-String.to_float(s)
-Float.parse(s)
-
-# Safety
-String.to_existing_atom(s)                 # Prefer over String.to_atom/1 — avoids atom table exhaustion
-
-# Interpolation (use this — never <> in a loop)
-"Hello, #{name}! You have #{count} messages."
-
-# Sigils
-~s"single-quoted with interpolation: #{x}"
-~S"no interpolation — literal #{x}"
-~r/regex/i                                 # Regex with case-insensitive flag
-~w(foo bar baz)a                           # Word list as atoms: [:foo, :bar, :baz]
-~c"charlist — old string format, sometimes required for Erlang interop"
-```
-
-### 6.8 The `&` capture operator
-
-```elixir
-# Function capture — reference an existing named function
-Enum.map(users, &User.name/1)              # Preferred for named functions
-Enum.map(users, &User.name(&1))            # Equivalent but more characters
-
-# Inline capture with &N placeholders
-Enum.map(1..10, &(&1 * 2))                 # Short inline
-Enum.reduce(1..10, 0, &(&1 + &2))          # Two args: &1, &2
-
-# BAD — unnecessary anonymous function wrapper
-Enum.map(users, fn user -> User.name(user) end)
-# GOOD — capture
-Enum.map(users, &User.name/1)
-
-# When the inline is complex, prefer fn for readability
-Enum.map(users, fn user ->
-  %{id: user.id, name: String.upcase(user.name), tenant: user.org.tenant_id}
-end)
-# DON'T try to shoehorn this into & (&1 capture gets hard to read fast)
-```
-
-### 6.9 Keyword options + `Keyword.validate!/2`
-
-```elixir
-def search(query, opts \\ [])
-def search(query, opts) when is_binary(query) do
-  # Validate at the entry point — rejects typos, sets defaults
-  opts = Keyword.validate!(opts, limit: 10, offset: 0, fields: [], highlight: [])
-
-  # opts is now a keyword list with all four keys present
-  do_search(query, opts[:limit], opts[:offset], opts[:fields], opts[:highlight])
-end
-
-# Callers:
-search("hello", limit: 20, highlight: [:title])        # OK
-search("hello", limit: 20, unknown: :oops)             # Raises KeyError
-```
-
-**Rule:** every public function that takes a keyword options argument should call `Keyword.validate!/2` on entry. It catches typos at runtime (useful for scripts) and documents the accepted options.
-
-### 6.10 The `@spec` habit
-
-```elixir
-defmodule MyApp.Accounts do
-  @type user_attrs :: %{
-          optional(:email) => String.t(),
-          optional(:name) => String.t(),
-          optional(:password) => String.t()
-        }
-
-  @type result :: {:ok, User.t()} | {:error, Ecto.Changeset.t()}
-
-  @spec register(user_attrs()) :: result()
-  def register(attrs), do: ...
-
-  @spec fetch(pos_integer()) :: {:ok, User.t()} | {:error, :not_found}
-  def fetch(id), do: ...
-
-  @spec fetch!(pos_integer()) :: User.t()
-  def fetch!(id), do: ...
+def start_link(opts) do
+  opts = Keyword.validate!(opts, [name: __MODULE__, timeout: 5_000, retries: 3])
+  GenServer.start_link(__MODULE__, opts, name: opts[:name])
 end
 ```
-
-**Rules:**
-
-- Every public function: `@spec`
-- Every public module: `@moduledoc`
-- Every public function: `@doc` (one sentence + examples if non-trivial)
-- Internal modules: `@moduledoc false`
-- Internal helpers exposed as `def` because of Mox or similar: `@doc false`
 
 ---
 
@@ -3188,248 +2880,9 @@ This skill covers idiomatic Elixir writing. For domain-specific depth, load the 
 
 ## 12. Quick References — Stdlib Cheat Sheets
 
-Dense lookups for the functions you'll type most often. For the full stdlib reference, load the `elixir` skill's `quick-references.md`.
+> **Depth:** [stdlib-cheatsheet.md](stdlib-cheatsheet.md) — dense signature lookups for `Enum`, `Map`, `Keyword`, `List`, `String`, `File`/`Path`/`System`, `Regex`, `Date`/`Time`, `Process`, Erlang stdlib picks (`:timer`, `:queue`, `:ets`, `:persistent_term`, `:crypto`, `:rand`, `:math`), `JSON`/`Jason`, `URI`/`Base`, `Access`/nested data, `Logger`, supervision child specs. Load when you need a call signature fast and don't need the full reference.
 
-### 12.1 Enum — top 30
-
-```elixir
-Enum.map(enum, fun)               Enum.filter(enum, fun)
-Enum.reject(enum, fun)            Enum.reduce(enum, acc, fun)
-Enum.reduce_while(enum, acc, fn)  Enum.flat_map(enum, fun)
-Enum.find(enum, fun)              Enum.find_value(enum, fn)
-Enum.find_index(enum, fun)        Enum.any?(enum, fun)
-Enum.all?(enum, fun)              Enum.count(enum)
-Enum.count(enum, fun)             Enum.empty?(enum)
-Enum.member?(enum, x)             Enum.sum(enum)
-Enum.min_by(enum, fun)            Enum.max_by(enum, fun)
-Enum.sort_by(enum, fun, order)    Enum.group_by(enum, key_fn)
-Enum.frequencies(enum)            Enum.frequencies_by(enum, fn)
-Enum.uniq(enum)                   Enum.uniq_by(enum, fun)
-Enum.chunk_every(enum, n)         Enum.chunk_by(enum, fun)
-Enum.with_index(enum)             Enum.zip(a, b)
-Enum.split_with(enum, fun)        Enum.take(enum, n)
-Enum.drop(enum, n)                Enum.take_while(enum, fn)
-Enum.drop_while(enum, fn)         Enum.into(enum, collectable)
-Enum.map_join(enum, joiner, fn)   Enum.map_reduce(enum, acc, fn)
-```
-
-### 12.2 Map
-
-```elixir
-Map.get(map, key)                 Map.get(map, key, default)
-Map.fetch(map, key)               Map.fetch!(map, key)
-Map.put(map, key, value)          Map.put_new(map, key, value)
-Map.delete(map, key)              Map.drop(map, keys)
-Map.take(map, keys)               Map.merge(a, b)
-Map.merge(a, b, fn)               Map.update(map, k, default, fn)
-Map.update!(map, k, fn)           Map.has_key?(map, k)
-Map.keys(map)                     Map.values(map)
-Map.new()                         Map.new(enum)
-Map.new(enum, fn)                 Map.from_struct(struct)
-map[:key]                          %{map | key: new}          # Update existing only
-```
-
-### 12.3 Keyword
-
-```elixir
-Keyword.get(kw, k)                Keyword.get(kw, k, default)
-Keyword.fetch(kw, k)              Keyword.fetch!(kw, k)
-Keyword.put(kw, k, v)             Keyword.put_new(kw, k, v)
-Keyword.delete(kw, k)             Keyword.merge(a, b)
-Keyword.has_key?(kw, k)           Keyword.validate!(kw, [:a, b: 1])
-Keyword.keyword?(term)            Keyword.new(enum)
-```
-
-### 12.4 List
-
-```elixir
-[head | tail] = list              list ++ other        # O(length left)
-hd(list)                          tl(list)
-length(list)                      # O(n) — avoid on hot paths
-List.first(list)                  List.last(list)
-List.flatten(list)                List.duplicate(x, n)
-List.keyfind(list, k, pos)        List.keydelete(list, k, pos)
-List.keymember?(list, k, pos)     List.replace_at(list, i, x)
-List.insert_at(list, i, x)        List.delete_at(list, i)
-List.update_at(list, i, fn)       List.to_tuple(list)
-Enum.reverse(list)                # O(n)
-Enum.sort(list)                   Enum.sort_by(list, fn)
-```
-
-### 12.5 String
-
-```elixir
-String.trim(s)                    String.trim_leading(s, p)
-String.trim_trailing(s, p)        String.downcase(s)
-String.upcase(s)                  String.capitalize(s)
-String.replace(s, a, b)           String.replace(s, ~r/../, b)
-String.split(s, d)                String.split(s, d, parts: n)
-String.contains?(s, p)            String.starts_with?(s, p)
-String.ends_with?(s, p)           String.length(s)     # grapheme count, O(n)
-byte_size(s)                      # byte count, O(1)
-String.to_integer(s)              String.to_existing_atom(s)
-String.slice(s, start, len)       String.pad_leading(s, n, pad)
-String.pad_trailing(s, n, pad)
-Integer.parse(s)                  Float.parse(s)
-"#{a} and #{b}"                   # interpolation — preferred over <>
-```
-
-### 12.6 File / Path / System
-
-```elixir
-File.read(path)                   File.read!(path)
-File.write(path, content)         File.write!(path, content)
-File.exists?(path)                File.dir?(path)
-File.mkdir_p(path)                File.mkdir_p!(path)
-File.rm(path)                     File.rm_rf(path)
-File.cp(src, dst)                 File.cp_r(src, dst)
-File.ls(path)                     File.stream!(path)
-File.stat(path)                   File.cwd!()
-
-Path.join(a, b)                   Path.join([a, b, c])
-Path.expand(relative, __DIR__)    Path.basename(path)
-Path.dirname(path)                Path.extname(path)
-Path.rootname(path)               Path.relative_to_cwd(path)
-
-System.fetch_env!("DATABASE_URL") System.get_env("VAR", "default")
-System.monotonic_time(:millisecond)  System.system_time(:second)
-System.cmd("cmd", args)           System.cwd!()
-```
-
-### 12.7 Regex
-
-```elixir
-~r/pattern/flags                  # i=case-insensitive, u=unicode, m=multiline
-Regex.match?(~r/.../, s)          Regex.run(~r/(\w+)/, s)
-Regex.scan(~r/\d+/, s)            Regex.named_captures(~r/(?<y>\d+)/, s)
-Regex.replace(~r/.../, s, fn)     Regex.split(~r/\s/, s)
-```
-
-### 12.8 Date / Time
-
-```elixir
-DateTime.utc_now()                DateTime.from_iso8601(s)
-DateTime.to_iso8601(dt)           DateTime.diff(a, b, :second)
-DateTime.compare(a, b)            DateTime.add(dt, n, :second)
-DateTime.shift(dt, months: 1)     # Elixir 1.17+
-
-Date.utc_today()                  Date.from_iso8601(s)
-Date.diff(a, b)                   Date.compare(a, b)
-Date.add(date, days)              Date.day_of_week(date)
-
-NaiveDateTime.utc_now()
-Time.utc_now()
-
-Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
-```
-
-### 12.9 Process
-
-```elixir
-self()                            spawn(fn -> ... end)
-spawn_link(fn -> ... end)         spawn_monitor(fn -> ... end)
-Process.alive?(pid)               Process.exit(pid, reason)
-Process.monitor(pid)              Process.demonitor(ref, [:flush])
-Process.link(pid)                 Process.unlink(pid)
-Process.send(pid, msg, opts)      Process.send_after(pid, msg, ms)
-Process.cancel_timer(ref)         Process.flag(:trap_exit, true)
-Process.whereis(name)             Process.register(pid, name)
-Process.info(pid)                 Process.info(pid, :message_queue_len)
-```
-
-### 12.10 Erlang stdlib — daily picks
-
-```elixir
-:timer.send_after(5_000, self(), :tick)
-:timer.tc(fn -> work() end)                  # {microseconds, result}
-:queue.new() |> :queue.in(:a) |> :queue.out()
-
-:ets.new(:t, [:named_table, :public, read_concurrency: true])
-:ets.insert(:t, {key, val})       :ets.lookup(:t, key)
-:ets.delete(:t, key)              :ets.update_counter(:t, k, {2, 1}, {k, 0})
-
-:persistent_term.put({MyApp, :cfg}, val)
-:persistent_term.get({MyApp, :cfg})
-
-:crypto.strong_rand_bytes(32)
-:crypto.hash(:sha256, data)
-:crypto.mac(:hmac, :sha256, key, msg)
-
-:rand.uniform()                   :rand.uniform(n)
-:math.log2(x)                     :math.sqrt(x)
-
-:erlang.system_info(:process_count)
-:erlang.system_info(:schedulers)
-```
-
-### 12.11 JSON (Elixir 1.18+) / Jason
-
-```elixir
-# Built-in (Elixir 1.18+)
-JSON.encode!(%{a: 1})             JSON.decode!(~s({"a":1}))
-
-# Jason (older Elixir / feature parity)
-Jason.encode!(%{a: 1})            Jason.decode!(~s({"a":1}))
-Jason.decode!(~s({"a":1}), keys: :atoms)         # DANGEROUS with user input
-Jason.decode!(~s({"a":1}), keys: :existing_atoms) # Safer
-```
-
-### 12.12 URI / Base
-
-```elixir
-URI.parse("https://x.com/path?q=1")
-URI.encode_query(%{q: "hello"})
-URI.decode_query("q=hello")
-URI.encode("hello world")          URI.decode(encoded)
-
-Base.encode64(binary)              Base.decode64!(s)
-Base.encode16(binary)              Base.decode16!(s)
-Base.url_encode64(binary)          Base.url_decode64!(s)
-```
-
-### 12.13 Access / Nested data
-
-```elixir
-get_in(map, [:a, :b, :c])                   # nil on any missing key
-put_in(map, [:a, :b, :c], value)
-update_in(map, [:a, :b, :c], fn v -> v + 1 end)
-pop_in(map, [:a, :b, :c])                   # {value, rest_of_map}
-
-# With Access helpers
-get_in(list, [Access.all(), :name])         # All names in a list of maps
-update_in(list, [Access.filter(& &1.active), :count], & &1 + 1)
-```
-
-### 12.14 Logger — levels
-
-```elixir
-Logger.debug("...")               Logger.info("...", meta: value)
-Logger.notice("...")              Logger.warning("...")
-Logger.error("...")
-
-# Structured metadata
-Logger.info("order completed", order_id: id, total: amount)
-
-# Lazy message — closure only runs if level enabled
-Logger.debug(fn -> "state: #{inspect(compute_heavy())}" end)
-```
-
-### 12.15 Supervision child specs
-
-```elixir
-# Module child spec (module defines child_spec/1)
-MyApp.Worker
-{MyApp.Worker, opt: val}
-
-# Full child spec map
-%{
-  id: :unique_id,
-  start: {MyApp.Worker, :start_link, [args]},
-  restart: :permanent,          # :permanent | :transient | :temporary
-  type: :worker,                # :worker | :supervisor
-  shutdown: 5_000
-}
-```
+For the full stdlib reference (every function with parameters and examples), load the parent `elixir` skill's `quick-references.md`.
 
 ---
 

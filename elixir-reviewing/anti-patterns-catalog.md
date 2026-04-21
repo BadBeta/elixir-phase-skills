@@ -400,7 +400,7 @@ end
 def handle_info(:tick, state) do
   Process.sleep(10_000)
   work()
-  Process.send(self(), :tick, ...)
+  send(self(), :tick)
   {:noreply, state}
 end
 
