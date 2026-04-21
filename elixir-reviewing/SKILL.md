@@ -286,6 +286,9 @@ Full reference: `elixir-planning` §14. Flag these if you see them in a diff.
 | Two moduledocs that describe the same subsystem disagree (e.g., `App.Application` says "binds IPv4 only" while `Plugs.RequireLoopback` says "binds IPv4 + IPv6") | Reconcile both moduledocs against the code as one atomic change. Cross-file contradictions are Rule 13 distributed — harder to spot, same defect | Block | implementing type-and-docs rule 14 |
 | Plug's `init/1` / `call/2` uses `Plug.opts()` when the plug actually accepts specific keys | Define a narrow `@type opts :: [...]` and use it in both specs | Suggest | implementing type-and-docs §Plug signature |
 | New feature is a library candidate but uses `Application.compile_env` | For library code, use runtime `get_env` or config-via-args | Block (if library) | planning §10.3 |
+| Public context function's moduledoc claims atomicity ("both X and Y, or neither") across a DB write AND a non-DB side effect (process-registration, PubSub broadcast, external API call), but the code just does them sequentially and doesn't roll back | Wrap both in `Ecto.Multi.run/3` so the DB row rolls back on side-effect failure, OR remove the atomicity claim and document the recoverable orphan state. Either way: the moduledoc must match the code — this is Rule 13 applied to a specific anti-pattern | Request-change | implementing type-and-docs rule 13 |
+| Moduledoc references a future milestone ("M9 will add Broadway" / "in M12 this becomes atomic") after that milestone has already merged | Rewrite the claim in the present tense describing current behaviour. Milestone-references belong in commit messages and a plan doc, not in each module's `@moduledoc` where they silently decay into lies | Suggest during a rollout; Request-change three milestones after the referenced one merged | implementing type-and-docs rule 13 |
+| LiveView `handle_info` handler for a PubSub message reloads the whole collection from the DB to derive a counter / display state that could be updated from the message content + existing assigns | Change the **broadcast payload** to carry everything the subscriber needs (e.g., `{:device_state_changed, id, old, new}` not `{:device_state_changed, id, new}`) so the LV can update assigns in O(1) instead of re-querying. Never pay N queries per message | Request-change | phoenix-liveview rule 2 + implementing production-patterns |
 
 ### 7.2 Control flow review
 
@@ -333,6 +336,7 @@ Full reference: `elixir-implementing` §6.4–§6.5, §7.3.
 | `Enum.reduce(xs, "", &(&2 <> &1))` (string concat in loop, O(n²)) | IO list + `IO.iodata_to_binary/1`, or `Enum.map_join/3` | Block (performance) |
 | `Enum.map/filter/etc.` on a large dataset or stream | `Stream.*` + terminal `Enum.*` | Suggest (performance) |
 | `Enum.find` + `if` pattern | `Enum.find_value/2` or `Enum.find/2` with match | Suggest |
+| `Enum.group_by(xs, &key/1) \|> Enum.(each\|map)(fn {k, group} -> f(k, length(group)) end)` (materializes per-key lists just to count them) | `Enum.frequencies_by(xs, &key/1) \|> Enum.each/map(...)` — one pass, integer counts, no intermediate list allocation | Request-change on hot paths; Suggest otherwise |
 
 ### 7.5 Error handling review
 
@@ -352,6 +356,7 @@ Full reference: `elixir-implementing` §7.4, §8.1–§8.2.
 | Compound error reason squashing distinct failures (e.g. `{:out_of_range_or_wrong_type, v}`) | Split into distinct tags: `{:wrong_type, v}` + `{:out_of_range, v, range}` | Request-change |
 | Public module mixes raise and `{:error, _}` for same failure class (e.g. `describe/1` raises but `execute/4` returns `{:error, _}`) | Pick one per boundary. Safe name returns ok/error; `!` variant raises | Request-change |
 | `with` chain validates data inputs before dispatch key, forcing dummy data for reflection calls | Validate dispatch key first; reflection paths then bypass data validation | Suggest |
+| `with` chain mixes sentinel-valued short-circuits (`:noop`, `:skip`) and `{:error, _}` tuples, with an `else` clause `:noop -> :noop; other -> other` passing everything else through untyped | Give `:noop` / `:skip` explicit `else` clauses separately from `{:error, _}=e -> e`, OR split into two functions: a "should-we-run" predicate on top, a `with` chain only for actual work. Current shape lets future `{:error, _}` returns leak unreviewed into callers | Suggest |
 
 ### 7.6 Process / OTP review
 
@@ -375,6 +380,8 @@ Full reference: `elixir-implementing` §9, `elixir-planning` §8.
 | Missing `@impl` on behaviour callback | Add `@impl true` (or `@impl BehaviourModule`) | Request-change |
 | Raw `%{}` / `Map.put` on a struct (silently accepts typos) | Struct update `%{struct \| field: val}` | Request-change |
 | No `format_status/1` on GenServer holding secrets | Implement `format_status/1` to scrub tokens/passwords | Request-change |
+| GenServer calls `:net_kernel.monitor_nodes(true)` in `init/1` without replaying `Node.list()` in `handle_continue/2` | Node connections that formed before this GenServer started are invisible — monitor_nodes only delivers future events. Retro-scan pattern: `{:ok, state, {:continue, {:retro_nodeup, Node.list()}}}` then fire the same handler. Same pattern applies to `Process.monitor/1` against a pre-existing DynamicSupervisor's children | Request-change if the GenServer drives business logic from nodeup; Suggest if audit-only |
+| Synchronous call into another OTP app's API inside `init/1` (e.g. `:fuse.install/2`, shared `:ets.new/2`, `:persistent_term.put/2` for boot config) | Defer to `handle_continue/2`. Listing the dep in `extra_applications` gives a partial order within the current app but not across apps — a GenServer in app A doing `B.init_table/1` in its own `init/1` can race with app B's own boot | Request-change |
 
 ### 7.7 Testing review
 
@@ -450,6 +457,7 @@ Full reference: `elixir-implementing` §8.6, `elixir-planning` §10.
 | Config value read on every call (hot path) | Cache in module attribute (app), `:persistent_term` (library hot path), or `Application.compile_env` (app) | Suggest |
 | Application code uses `Application.get_env` for a value that's truly frozen at compile time (no `runtime.exs` override, no test `put_env`) | Switch to `Application.compile_env` — Dialyzer sees the concrete type, missing-key crashes at compile, recompile triggers on config change. **Don't blindly switch:** if `config/runtime.exs` or any test overrides the key at runtime, `compile_env` silently freezes the default and breaks those flows. Verify both paths before changing | Suggest | implementing §10.5 |
 | `config/runtime.exs` parses an env var with `String.to_integer/1`, `String.to_atom/1`, etc. on raw input | Wrap with explicit validation: `case Integer.parse(val) do {n, ""} when n in range -> n; _ -> raise "VAR_NAME must be X, got: #{inspect(val)}" end`. A raw conversion exception at boot gives ops a stacktrace instead of a message | Request-change | implementing production-patterns §runtime.exs |
+| `runtime.exs` splits a comma-separated env var and `String.to_atom/1` on each element (`NODEPULSE_NODES="a@h1,b@h2"` → list of atoms) | Even for operator-controlled inputs this is unbounded atom creation on typos. Validate each element against a regex like `~r/^[a-z][\w]*@[\w\-.]+$/i` BEFORE converting, OR cap the list size, OR use `String.to_existing_atom/1` with a raise-on-unknown fallback. A CI pipeline accidentally generating a list of 10k node names can permanently exhaust the atom table | Block if from CI/untrusted; Request-change if strictly operator-controlled | implementing production-patterns §runtime.exs |
 | Hardcoded URLs / credentials / secrets | Move to config + env var | Block |
 | Test config imported into runtime code | Keep `config/test.exs` isolated; production should never import test config | Block |
 
