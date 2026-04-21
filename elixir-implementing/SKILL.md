@@ -1152,59 +1152,89 @@ for x <- 1..3, y <- 1..3, x <= y, do: {x, y}
 for type_expr <- args, var <- collect_vars(type_expr), uniq: true, do: var
 ```
 
-### 5.5 Recursion — only when Enum/Stream/for don't fit
+### 5.5 Recursion — the third iteration tool
 
-> **Depth:** [idioms-reference.md](idioms-reference.md) §Recursion — tail-call optimization explained, accumulator-reverse pattern, body-vs-tail recursive trade-offs, early termination, tree/graph traversal, mutual recursion, recursion-vs-`reduce_while` decision, wrapping recursive walkers as lazy streams.
+> **Depth:** [idioms-reference.md](idioms-reference.md) §Recursion — Last Call Optimization (LCO) explained with tail-position precision table, body-vs-tail trade-offs with modern BEAM/JIT performance nuance, accumulator-reverse pattern, binary-pattern recursion, tree traversal, mutual recursion, recursion-vs-`reduce_while` decision, wrapping recursive walkers as lazy streams.
 
-**Use recursion only for:**
+Recursion is **a first-class iteration tool in Elixir**, not a fallback. A tail-recursive function with pattern matching is the functional equivalent of an imperative `while` loop — constant stack, pattern-dispatch on the state.
 
-- Early termination with complex conditions (`Enum.reduce_while` usually suffices)
-- Tree / graph traversal where the structure is genuinely recursive
-- Generation of infinite/lazy sequences (prefer `Stream.iterate` / `Stream.unfold`)
+**When recursion is the right answer:**
 
-**Idiomatic template — accumulator + build-and-reverse:**
+- **Long-running loops** — GenServer message loops, TCP accept loops, retry loops. Elixir's idiomatic `while (true)`.
+- **Early termination** with halt conditions spanning multiple accumulators (simple cases fit `Enum.reduce_while`).
+- **Tree / graph / AST traversal** where the structure is genuinely recursive.
+- **Binary decoders** — `<<byte, rest::binary>> = data; decode(rest)` is the dominant BEAM-optimized pattern for parsers.
+- **Parsers and walkers** where each element shapes what you do with the next.
+- **Infinite / lazy generation** — wrapped in `Stream.iterate`/`Stream.unfold`/`Stream.resource`.
+- **Custom enumeration** — implementing `Enumerable`.
+
+**Tail vs body recursion — both are first-class.** The Erlang Efficiency Guide (*Seven Myths of Erlang Performance*) explicitly says: *"Use the version that makes your code cleaner (hint: it is usually the body-recursive version)."* Since R12B, body-recursive list construction uses the same memory as tail + reverse. The stdlib's `:lists.map/2`, `:lists.filter/2`, and list comprehensions are all body-recursive by choice.
+
+**When each is right:**
+
+| Situation | Prefer |
+|---|---|
+| Unbounded / adversarial input (user lists, streams) | **Tail** — guaranteed constant stack |
+| Long-running process loop | **Tail** — MUST (never terminates) |
+| Known-bounded structure (tree, AST, expression grammar, recurrence) | **Body** — clearer, often the better choice |
+| List transformation where order matters | Either — body-recursive is often cleaner; tail + reverse is explicit |
+| Modern OTP (24+) with JIT, performance matters | Benchmark — JIT has reversed some pre-JIT rules of thumb |
+
+**The while-loop analogy:**
 
 ```elixir
-# Public entry delegates to private helper with an accumulator
-def transform(list), do: do_transform(list, [])
-
-# Base case
-defp do_transform([], acc), do: Enum.reverse(acc)
-
-# Recursive step — prepend (O(1)) then reverse at the end (O(n))
-defp do_transform([head | tail], acc), do: do_transform(tail, [process(head) | acc])
-```
-
-**Tree traversal:**
-
-```elixir
-def flatten(%{children: children, value: v}) do
-  [v | Enum.flat_map(children, &flatten/1)]
+# Imperative: while (running) { msg = receive(); handle(msg); }
+def loop(state) do
+  receive do
+    :stop -> :ok
+    msg -> msg |> handle(state) |> loop()      # tail call — constant stack
+  end
 end
-def flatten(%{value: v}), do: [v]
+
+# Imperative: while (!done) { if (try_work()) break; sleep(); }
+def retry(attempt \\ 1) do
+  case work() do
+    {:ok, r} -> {:ok, r}
+    {:error, _} when attempt >= @max -> {:error, :exhausted}
+    {:error, _} -> Process.sleep(backoff(attempt)); retry(attempt + 1)
+  end
+end
 ```
 
-**Tail-call rules:**
+**Tail-position gotchas** (where LCO silently DOESN'T apply — see idioms-reference for full list):
 
-- The last expression in the function body must be the recursive call (or return value)
-- Operations *after* the recursive call (`[h | recur(t)]`) break TCO
-- `try/rescue` prevents TCO
-- Prefer build-and-reverse over direct append
+- `with ... else ...` — the `else` clause keeps the result for re-matching; final call is NOT tail.
+- `try do ... end` — the protected `do` body is NOT tail position (stacktrace is kept).
+- Arithmetic / construction around the call: `[x | recur(t)]` is body-recursive (fine for bounded input; not "broken").
 
 **BAD/GOOD:**
 
 ```elixir
-# BAD — not tail-recursive (cons happens after return), will stack-overflow on large input
+# Body-recursive — fine for reasonable inputs; stdlib :lists.map works exactly this way
 def double_all([]), do: []
 def double_all([h | t]), do: [h * 2 | double_all(t)]
 
-# GOOD — accumulator + reverse, TCO-safe
+# Tail-recursive + reverse — use when input may be unbounded
 def double_all(list), do: do_double_all(list, [])
 defp do_double_all([], acc), do: Enum.reverse(acc)
 defp do_double_all([h | t], acc), do: do_double_all(t, [h * 2 | acc])
 
-# BEST — Enum.map is clearer and equally efficient for bounded lists
+# Usually clearest — let Enum handle bounded-list work
 def double_all(list), do: Enum.map(list, &(&1 * 2))
+```
+
+**Real anti-patterns (these ARE broken):**
+
+```elixir
+# BAD — O(n²) from append in accumulator
+defp build([], acc), do: acc
+defp build([h | t], acc), do: build(t, acc ++ [process(h)])   # ++ on left operand!
+
+# BAD — reimplementing Enum.map
+def each_squared(list), do: do_each_squared(list, [])
+defp do_each_squared([], acc), do: Enum.reverse(acc)
+defp do_each_squared([h | t], acc), do: do_each_squared(t, [h * h | acc])
+# → just write: Enum.map(list, &(&1 * &1))
 ```
 
 ### 5.6 Guards — constraints at the function boundary

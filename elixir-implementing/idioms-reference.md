@@ -1032,66 +1032,125 @@ for <<r, g, b <- pixels>>, do: {r, g, b}
 
 ## Recursion
 
-In Elixir, recursion is the third flow-control pillar alongside `Enum`/`Stream` and `for` comprehensions. Reach for it when:
+Recursion is **a first-class iteration tool in Elixir**, alongside `Enum`/`Stream` and `for` comprehensions. A tail-recursive function is the functional equivalent of an imperative `while` loop: same constant stack, often the same runtime cost, better expressed through pattern matching.
 
-- **Early termination** with complex conditions (though `Enum.reduce_while/3` often suffices).
-- **Tree / graph traversal** (parent → children structures).
+**Reach for recursion when:**
+
+- **Long-running loops** — GenServer message loops, TCP accept loops, retry loops, supervision-adjacent idle loops. This is Elixir's `while (true)`.
+- **Early termination** with complex halt conditions spanning multiple accumulators (simple cases fit `Enum.reduce_while/3`).
+- **Tree / graph traversal** — parent→children structures, ASTs, nested documents.
+- **Parsers and walkers** where each element shapes what you do with the next.
 - **Mutually recursive** grammars or state transitions.
-- **Custom enumeration** with non-trivial state (often paired with `Stream.resource/3`).
-- **Parsers / walkers** where each element affects what you do with the next.
+- **Custom enumeration** (implementing `Enumerable`, often paired with `Stream.resource/3`).
+- **Infinite / lazy generation** — typically wrapped in `Stream.iterate`/`Stream.unfold`/`Stream.resource`.
+- **State-machine loops** in a single process — `receive` + tail call = `:gen_statem` without the framework.
 
-**When NOT to use:** for a simple map/filter/reduce, use `Enum`. A recursive function that's just re-implementing `Enum.map/2` is almost certainly wrong.
+**Canonical long-running loop:**
 
-### Tail-call optimization (TCO)
+```elixir
+# The functional while-loop — tail-recursive, constant stack, first-class pattern
+def loop(state) do
+  receive do
+    :stop -> :ok
+    msg -> msg |> handle(state) |> loop()
+  end
+end
+```
 
-A function call is **tail-recursive** when the recursive call is the *very last thing* a clause does — nothing wraps it, nothing uses its result other than returning it. The BEAM converts tail calls into jumps: **no new stack frame**, constant memory.
+```elixir
+# Retry loop with backoff — idiomatic; no framework required
+def retry(attempt \\ 1) do
+  case work() do
+    {:ok, result} -> {:ok, result}
+    {:error, _} when attempt >= @max_attempts -> {:error, :exhausted}
+    {:error, _} ->
+      Process.sleep(backoff(attempt))
+      retry(attempt + 1)
+  end
+end
+```
 
-**Tail-recursive — good:**
+**Reach for `Enum`/`Stream` instead when:**
+
+- A simple map/filter/reduce over a bounded collection — `Enum.map/2` is clearer than hand-rolled recursion and the compiler emits equivalent code.
+- Two-pass transformations — a pipeline of `|> Enum.*` reads top-to-bottom; helper-function recursion forces a jump.
+- You'd end up re-implementing `Enum.map/2` — use the real thing.
+
+### Last Call Optimization (LCO) — the full story
+
+The BEAM implements **Last Call Optimization** (often called TCO colloquially). LCO applies to **any** call in tail position — self-recursion, mutual recursion, and calls to other modules — converting the call into a jump so the current stack frame is reused. Constant stack, no frame allocation.
+
+A call is in **tail position** when its result IS the function's return value — nothing wraps it, nothing follows it, the VM has no work left after the call.
+
+**Tail-recursive — constant stack:**
 
 ```elixir
 def sum([], acc), do: acc
-def sum([h | t], acc), do: sum(t, acc + h)  # recursion is the last thing
-
-sum([1, 2, 3, 4], 0)  # runs in constant stack
+def sum([h | t], acc), do: sum(t, acc + h)   # recursion is the last thing
 ```
 
-The accumulator carries the partial result forward. There's no work left when `sum` returns.
+The accumulator carries partial state. The VM reuses the frame on every call.
 
-**Body-recursive — NOT tail-call optimized:**
+**Body-recursive — uses the process heap (not a traditional stack):**
 
 ```elixir
 def sum([]), do: 0
 def sum([h | t]), do: h + sum(t)   # + wraps the recursive call
-
-# Each call allocates a stack frame until the base case —
-# then unwinds, computing h + (h + (h + ...))
 ```
 
-Body recursion uses O(n) stack. For small N (< 100K) it's fine and often clearer. For unbounded / large input, **always** use tail recursion.
+Each call's intermediate `h` waits in the heap until the recursion unwinds. The BEAM process heap (and stack-like area) grows dynamically — there's **no fixed stack-frame limit**. For bounded input this is fine; for unbounded input, memory grows with depth.
 
-**Key rule:** the recursive call must be in **tail position**. These are NOT tail positions:
+**The Erlang/OTP guidance** — from the official *Seven Myths of Erlang Performance*: *"Use the version that makes your code cleaner (hint: it is usually the body-recursive version)."* Since R12B, body-recursive list building uses the **same memory** as tail-recursive + `Enum.reverse`. The stdlib's `:lists.map`, `:lists.filter`, `:lists.foldr`, and list comprehensions are all body-recursive by choice.
+
+**Modern performance nuance** (OTP 24+ with JIT): on large inputs, tail-recursive versions of list operations can now be noticeably faster (the JIT inlines the frame-reuse aggressively), while body-recursive stays lower in peak memory. **Default to clarity;** benchmark only when a hot path proves it matters.
+
+### Tail-position precision
+
+Where LCO DOES apply:
+
+| Construct | Final call is tail? |
+|---|---|
+| `def f(...), do: other_fun()` | ✅ |
+| `case x do ... -> other_fun() end` (final branch) | ✅ |
+| `cond do true -> other_fun() end` | ✅ |
+| `if cond, do: other_fun(), else: another_fun()` | ✅ |
+| `with {:ok, x} <- step1() do other_fun(x) end` (no `else`) | ✅ |
+| Inside `rescue` / `catch` clauses | ✅ (stacktrace already captured) |
+| Mutual recursion — `def a, do: b(); def b, do: a()` | ✅ (LCO applies across modules too) |
+
+Where LCO does NOT apply (subtle traps):
+
+| Construct | Why not |
+|---|---|
+| `[h \| f(t)]` — wrapped in cons | Construction happens after the call returns |
+| `h + f(t)` — wrapped in arithmetic | Same reason |
+| `IO.puts(f(t))` — argument to another call | The outer call is the tail call |
+| `with ... do ... else ... end` | The `else` clause may match the result → VM keeps it ([elixir-lang #6251](https://github.com/elixir-lang/elixir/issues/6251)) |
+| `try do f() end` — the protected `do` body | Stacktrace is kept until `try` exits |
+| `try do ... after cleanup end` | `after` runs post-call → body is not tail |
 
 ```elixir
-# NOT tail — arithmetic wraps the call
-def f([h | t]), do: h + f(t)
-
-# NOT tail — the call is an argument to another call
-def f([h | t]), do: IO.puts(f(t))
-
-# NOT tail — the call is inside a case/if branch that adds computation after
+# Tail position inside case — ✅ LCO applies
 def f([h | t]) do
-  case g(t) do
-    :ok -> :ok
+  case check(h) do
+    :ok -> f(t)            # tail call — constant stack
+    :skip -> f(t)
   end
 end
-# ↑ Actually this IS tail-call — the case's return is the function's return.
 
-# Tail position inside case/if
+# NOT tail — with/else keeps the result
 def f([h | t]) do
-  if h > 0 do
-    f(t)                # TCO'd
+  with :ok <- check(h) do
+    f(t)                    # looks tail, but...
   else
-    []
+    :error -> []            # ...else forces the VM to hold the result
+  end
+end
+
+# Tail again — no else clause
+def f([h | t]) do
+  with :ok <- check(h) do
+    f(t)                    # LCO applies
   end
 end
 ```
@@ -1155,19 +1214,72 @@ end
 
 For most trees, body recursion is fine — stack depth is bounded by tree depth (usually ≤ 50). Only rewrite to tail recursion when the tree can be pathologically deep.
 
-### Mutual recursion
+### Binary pattern-match recursion — the decoder idiom
 
-Two functions that call each other — works naturally, but each call breaks TCO if not in tail position:
+The dominant pattern for binary protocol decoders, parsers, and byte-oriented state machines. The BEAM specifically optimizes sub-binary reuse — pattern-matching `<<head, rest::binary>>` reuses the underlying buffer rather than copying.
 
 ```elixir
-# Parse alternating identifiers and values
+# Decode a length-prefixed frame stream
+def decode_frames(<<>>), do: []
+def decode_frames(<<len::32, payload::binary-size(len), rest::binary>>) do
+  [payload | decode_frames(rest)]
+end
+
+# Parse null-terminated C strings out of a buffer
+def parse_cstrings(binary), do: parse_cstrings(binary, "", [])
+defp parse_cstrings(<<>>, _acc, out), do: Enum.reverse(out)
+defp parse_cstrings(<<0, rest::binary>>, acc, out),
+  do: parse_cstrings(rest, "", [acc | out])
+defp parse_cstrings(<<byte, rest::binary>>, acc, out),
+  do: parse_cstrings(rest, acc <> <<byte>>, out)
+
+# Stateful decoder — case on a header byte, dispatch to the right parser
+def decode(<<0x01, rest::binary>>, state), do: decode_login(rest, state)
+def decode(<<0x02, rest::binary>>, state), do: decode_message(rest, state)
+def decode(<<>>, state), do: {:done, state}
+```
+
+The `<<byte, rest::binary>>` pattern is a **tail-recursive match** on the buffer — the BEAM's sub-binary optimization means `rest` is a pointer into the original binary, not a copy. This makes binary-pattern recursion O(n) total for decoding any protocol.
+
+### Mutual recursion
+
+Two (or more) functions calling each other — LCO applies the same way. Both self- and mutual tail calls reuse the frame.
+
+```elixir
+# Parse alternating identifiers and values — mutually recursive
 def parse([], acc), do: Enum.reverse(acc)
 def parse([name | rest], acc) when is_atom(name), do: parse_value(rest, name, acc)
 
+def parse_value([], _name, acc), do: Enum.reverse(acc)
 def parse_value([value | rest], name, acc), do: parse(rest, [{name, value} | acc])
 ```
 
-The compiler optimizes mutual tail calls too — the call chain doesn't grow the stack.
+**Classic use:** state machines as mutually-recursive state functions (pre-`:gen_statem`). Each state is a function; transitions are tail calls between state functions.
+
+```elixir
+def state_idle(state) do
+  receive do
+    {:connect, host} -> state_connecting(%{state | host: host})
+    :stop -> :ok
+  end
+end
+
+def state_connecting(state) do
+  receive do
+    :connected -> state_active(state)
+    :timeout -> state_idle(state)
+  end
+end
+
+def state_active(state) do
+  receive do
+    {:data, d} -> state_active(%{state | buffer: [d | state.buffer]})
+    :disconnect -> state_idle(state)
+  end
+end
+```
+
+LCO ensures none of these transitions grow the stack — it's a real state machine, not a leak.
 
 ### Recursion vs Enum.reduce_while — decision
 
@@ -1194,19 +1306,21 @@ def map_good([], _fun, acc), do: Enum.reverse(acc)
 def map_good([h | t], fun, acc), do: map_good(t, fun, [fun.(h) | acc])
 ```
 
-**Body recursion on potentially unbounded input:**
+**Body recursion on genuinely unbounded input:**
+
+This isn't always "BAD" — for bounded lists body recursion is fine and often clearer. The problem is when input size is user-controlled or stream-sourced and could be arbitrarily large. For those, prefer tail recursion (or just `Enum`).
 
 ```elixir
-# BAD — stack overflow on long lists
+# RISKY for unbounded input — heap grows with recursion depth
 def sum([]), do: 0
 def sum([h | t]), do: h + sum(t)
 
-# GOOD — tail-recursive with accumulator
+# SAFE for any size — constant stack
 def sum(list), do: sum(list, 0)
 defp sum([], acc), do: acc
 defp sum([h | t], acc), do: sum(t, h + acc)
 
-# BEST — just use Enum.sum
+# IDIOMATIC — just use Enum.sum
 ```
 
 **Forgetting to reverse:**
