@@ -1,24 +1,17 @@
 ---
 name: elixir-planning
 description: >
-  Elixir architectural planning — the decisions made BEFORE writing implementation code.
-  Covers project layout (single app / umbrella / poncho / library), domain boundaries
-  (contexts, aggregates, entity vs use case), data ownership and multi-tenancy,
-  process architecture (supervision as architecture, error kernel, stateful vs stateless),
-  inter-context communication (direct call / PubSub / Registry / GenStage / Broadway / Oban /
-  event sourcing — with decision guide), configuration strategy, resilience patterns
-  (bulkheads, circuit breakers, retries, graceful degradation, timeouts), architectural
-  styles (MVC / hexagonal / modular monolith / event-driven / CQRS / microservices),
-  growing architecture from small to large, distributed systems, and the architectural
-  anti-patterns to avoid.
-  ALWAYS use when planning or designing an Elixir application, service, or feature.
-  ALWAYS use when the user asks to "design", "architect", "structure", "plan", "lay out",
-  or "organize" Elixir code.
-  ALWAYS use when choosing between umbrella/single-app, contexts, process placement,
-  supervision strategy, or inter-context communication mechanism.
+  Elixir architectural planning — the decisions made BEFORE writing code. Covers project
+  layout, domain boundaries (contexts, aggregates), data ownership, multi-tenancy, process
+  architecture and supervision, inter-context communication (direct call, PubSub, Registry,
+  GenStage, Broadway, Oban, event sourcing), configuration, resilience (bulkheads, circuit
+  breakers, retries, timeouts), architectural styles (hexagonal, modular monolith, CQRS,
+  event-driven), growing from small to large, distributed systems, and anti-patterns.
+  ALWAYS use when designing, architecting, structuring, or planning an Elixir application.
+  ALWAYS use when choosing between umbrella/single-app, contexts, process placement, or
+  supervision strategy.
   ALWAYS use when starting a new Elixir project or major refactor.
-  ALWAYS use when the user asks "should I split X into Y" or "where should Z live".
-  For writing the code itself (patterns, constructs, idiom), also load elixir-implementing.
+  For writing the code itself, also load elixir-implementing.
 ---
 
 # Elixir — Planning Skill
@@ -286,27 +279,21 @@ Eleven principles that govern every structural decision. When in doubt, return h
 
 ### 4.1 The eleven principles
 
-1. **Dependencies point inward.** Interface depends on Domain. Domain depends on nothing external. Infrastructure implements contracts defined by Domain. Never let inner layers reference outer layers. A domain module must NEVER alias, import, or reference web modules, controller helpers, or framework-specific types.
+| # | Principle | Core idea |
+|---|---|---|
+| 1 | **Dependencies point inward** | Interface→Domain→ nothing. Infrastructure implements contracts the Domain defines. Domain must never alias/import framework modules. |
+| 2 | **Behaviours are ports, implementations are adapters** | Every external dependency (DB, API, email, hardware) sits behind a `@callback` behaviour the domain owns. Config picks the impl. Ecto.Adapter + Postgres/MySQL is the canonical example. |
+| 3 | **Side effects live in infrastructure** | The ideal. In practice, Phoenix contexts intentionally mix Repo into domain-adjacent modules (`mix phx.gen.context` does this). Full separation is event-sourcing territory. For non-Repo side effects (HTTP, email, I/O), apply the boundary. |
+| 4 | **The supervision tree IS the architecture** | Start order = dependency order. Strategy encodes coupling. Not fault-tolerance plumbing — a structural expression of what-depends-on-what. |
+| 5 | **Error kernel design** | Stable, critical-state processes near the top; volatile workers below. A worker crash must not topple critical state. Design for recovery, not prevention. |
+| 6 | **Pure core, impure shell** | GenServers own process mechanics; pure functions own domain logic. Test domain logic without processes. For complex dispatch, use the instructions pattern (§8.7). |
+| 7 | **One reason to change per boundary module** | If a module changes for both business rules AND DB schema reasons, it has too many responsibilities. Boundary modules are public-API facades; internals take `@moduledoc false`. |
+| 8 | **Design for replaceability** | Can you swap a component's implementation without touching business logic? If not, add a behaviour at the boundary. |
+| 9 | **Small, focused behaviours** | Prefer `Chargeable` + `Refundable` + `Subscribable` over one 20-callback `PaymentGateway`. Clients shouldn't depend on callbacks they don't use. |
+| 10 | **The testability test** | If you can't test a business rule without a DB, web server, or external service, the architecture has a boundary problem. Pure domain logic → plain ExUnit, no Repo, no HTTP, no processes. |
+| 11 | **Scream the domain** | Top-level module names reflect business (`Accounts`, `Catalog`, `Billing`) not technical (`Controllers`, `Services`, `Helpers`). A new dev should read the module tree and understand what the system does. |
 
-2. **Behaviours are ports. Implementations are adapters.** Every external dependency (database, API, email, file system, hardware) is behind a `@callback` behaviour defined by the domain. Config selects which implementation runs. This IS hexagonal architecture — Elixir has it built in. Ecto itself follows this pattern: `Ecto.Adapter` is a behaviour, Postgres/MySQL/SQLite are adapters.
-
-3. **Side effects belong in infrastructure, never in domain** — the ideal. In practice, Phoenix contexts intentionally mix Repo calls into domain-adjacent modules (`mix phx.gen.context` generates this). Full separation (pure domain, Repo behind behaviours) is practiced in event-sourced systems but is not the norm for standard Phoenix CRUD apps. For non-Repo side effects (HTTP, email, file I/O), the behaviour boundary is consistently applied.
-
-4. **The supervision tree IS the architecture.** Start order = dependency order. Strategy encodes coupling. The tree is not just fault tolerance — it expresses which components depend on which, what restarts together, and what can fail independently.
-
-5. **Error kernel design.** Stable processes hold critical state near the top of the tree. Volatile, crash-prone workers live below. If a worker crashes, critical state survives. Design for recovery, not prevention.
-
-6. **Pure core, impure shell.** GenServers delegate business logic to pure functions. The GenServer handles process mechanics (state, messages, lifecycle). Pure functions handle domain logic (calculations, validations, transformations). This makes domain logic testable without processes. For complex cases, use the **instructions pattern** — domain functions return instruction tuples, GenServer interprets them (§8.7).
-
-7. **Each boundary module has one reason to change: its domain changes.** If a module changes because both business rules changed AND the database schema changed, it has too many responsibilities. Boundary modules are public API facades. Internal modules use `@moduledoc false`.
-
-8. **Design for replaceability.** Can you swap this component's implementation without changing business logic? If not, introduce a behaviour at the boundary.
-
-9. **Keep behaviours small and focused.** No client should be forced to depend on callbacks it doesn't use. Prefer multiple small behaviours over one large one. Split `Chargeable`, `Refundable`, `Subscribable` rather than one giant `PaymentGateway` with 20 callbacks.
-
-10. **The testability test.** If you cannot test a business rule without starting a database, web server, or external service, your architecture has a boundary problem. Pure domain logic should be testable with plain ExUnit — no Repo, no HTTP, no processes required.
-
-11. **Scream the domain.** Top-level module names reflect business concepts (`Accounts`, `Catalog`, `Billing`, `Sensors`) — not technical concerns (`Controllers`, `Models`, `Services`, `Helpers`). A developer reading the module tree should understand what the system does, not what framework it uses.
+> **Depth:** [architecture-patterns.md](architecture-patterns.md) walks each principle with worked examples, failure modes, and migration patterns for retrofitting onto existing code.
 
 ### 4.2 The Actor Model — what BEAM gives you for free
 
@@ -2496,7 +2483,7 @@ Once the plan is clear, load `elixir-implementing` and write the code. The two s
 ### Elixir family
 
 - **[elixir-implementing](../elixir-implementing/SKILL.md)** — the companion skill for daily coding. Decision tables for constructs, idiomatic templates, TDD, testing essentials, OTP callback patterns, anti-patterns Claude produces. Load alongside this skill when planning transitions to implementation.
-- **elixir-reviewing** *(planned)* — review checklist, anti-pattern catalog, "is this idiomatic?" trees. Load when reviewing existing code.
+- **[elixir-reviewing](../elixir-reviewing/SKILL.md)** — review checklist, anti-pattern catalog, debugging + profiling playbooks, performance catalog, security audit. Load when reviewing PRs or auditing existing code.
 - **`elixir`** — the original comprehensive Elixir skill with many reference subfiles (architecture-reference, language-patterns, ecto-reference, otp-reference, networking, etc.). This `elixir-planning` skill restructures and improves the architecture-reference content for planning-mode use; load the original for deep reference material beyond what's here.
 
 ### Framework / domain

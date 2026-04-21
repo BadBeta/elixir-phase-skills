@@ -32,7 +32,7 @@ def handle(e), do: handle_other(e)
 ```elixir
 # BAD
 try do
-  Integer.parse!(user_input)
+  String.to_integer(user_input)
 rescue
   ArgumentError -> {:error, :invalid}
 end

@@ -1,23 +1,17 @@
 ---
 name: elixir-reviewing
 description: >
-  Elixir code inspection — reviewing PRs and diffs, debugging existing bugs, and profiling
-  performance issues. Covers the full audit toolkit: review checklists organized by area
-  (architecture, control flow, pipelines, collections, error handling, OTP, testing, security,
-  performance, configuration), severity classification (block/request-change/suggest/nitpick),
-  the debugging playbook (symptom → investigation steps for crashes, mailbox buildup, memory
-  growth, slow response, flaky tests, Dialyzer warnings), the profiling playbook (:timer.tc,
-  Benchee, fprof/eprof/cprof/tprof, :observer, memory/ETS/binary analysis), common Elixir
-  performance pitfalls with fixes, suggested refactor templates, and review-comment style.
+  Elixir code inspection — reviewing PRs and diffs, debugging bugs, and profiling performance.
+  Covers the full audit toolkit: review checklists by area (architecture, control flow, OTP,
+  testing, security, performance, configuration), severity classification, the debugging
+  playbook (crashes, mailbox buildup, memory growth, slow response, flaky tests, Dialyzer
+  warnings), the profiling playbook (:timer.tc, Benchee, fprof/eprof/tprof, :observer, memory
+  analysis), performance pitfall catalog, refactor templates, and review-comment style.
   ALWAYS use when reviewing Elixir pull requests, diffs, or existing modules.
-  ALWAYS use when debugging an Elixir bug — "this crashes", "memory growing", "mailbox
-  buildup", "flaky test", "slow response", "why is this happening".
-  ALWAYS use when profiling Elixir performance — "where's the bottleneck", "why is this slow",
-  "measure this", "optimize this".
-  ALWAYS use when the user asks to "audit", "critique", "find issues in", "review", "debug",
-  or "profile" Elixir code.
-  For designing from scratch also load elixir-planning; for writing idiomatic code also load
-  elixir-implementing — this skill covers inspecting code that already exists.
+  ALWAYS use when debugging Elixir bugs — crashes, memory growth, mailbox buildup, flaky tests.
+  ALWAYS use when profiling Elixir performance — finding bottlenecks, measuring, optimizing.
+  ALWAYS use when asked to audit, critique, review, debug, or profile Elixir code.
+  For designing from scratch load elixir-planning; for writing code load elixir-implementing.
 ---
 
 # Elixir — Reviewing Skill
@@ -360,7 +354,7 @@ Full reference: `elixir-implementing` §9, `elixir-planning` §8.
 | `GenServer.call(pid, :msg)` without explicit timeout | Pass `timeout` arg explicitly (default 5000ms is often wrong) | Request-change |
 | `GenServer.call` to a variable pid without `catch :exit` | Wrap with `try ... catch :exit, _ -> {:error, :down}` — the process may die mid-call | Request-change |
 | Hardcoded timeout literal like `GenServer.call(pid, msg, 30_000)` | Extract to `@default_X_timeout` module attribute | Suggest |
-| Registry + DynamicSupervisor under `:one_for_one` | `:rest_for_one` or dedicated `:one_for_all` sub-supervisor | Block |
+| Registry + DynamicSupervisor under `:one_for_one` | Dedicated `:one_for_all` sub-supervisor so both restart together when Registry dies | Block |
 | GenServer with large state (> ~100KB) | Move large data to ETS / `:persistent_term` | Request-change |
 | GenServer just wrapping a map (get/put) | Use ETS directly (no serialization bottleneck) | Suggest |
 | Registry-registered process called as `GenServer.call(:name, msg)` | Use `{:via, Registry, {Reg, name}}` or helper `via/1` | Block |

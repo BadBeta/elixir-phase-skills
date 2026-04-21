@@ -3437,8 +3437,8 @@ MyApp.Worker
 
 ### Elixir family (recommended companions)
 
-- **`elixir-planning`** *(planned)* — Upfront architecture: project layout, context splitting, supervision shape, data ownership, umbrella-vs-single decisions. Load before starting a new project or major restructure.
-- **`elixir-reviewing`** *(planned)* — Review checklist, anti-pattern catalog, "is this idiomatic?" decision trees. Load when reviewing PRs or auditing existing code.
+- **`elixir-planning`** — Upfront architecture: project layout, context splitting, supervision shape, data ownership, umbrella-vs-single decisions. Load before starting a new project or major restructure.
+- **`elixir-reviewing`** — Review checklist, anti-pattern catalog, "is this idiomatic?" decision trees. Load when reviewing PRs or auditing existing code.
 - **`elixir`** — The original comprehensive Elixir skill with many reference subfiles (architecture-reference, language-patterns, ecto-reference, otp-reference, networking, etc.). Use for deep topic dives that this concise skill doesn't cover.
 - **`elixir-testing`** — Deep testing reference: property-based depth, ExVCR, Wallaby, channel / LiveView testing at the full API level, OTP process testing patterns. `elixir-implementing` covers the daily 80%; load this for the 20%.
 
