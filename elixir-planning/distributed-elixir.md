@@ -308,6 +308,68 @@ Use PostgreSQL, Redis, or a distributed store as the truth. Nodes are stateless 
 
 **Partition-tolerance in BEAM distribution is LIMITED by design.** The BEAM is optimized for LAN reliability. If you need Raft-like consensus, use a library that explicitly provides it (`:ra` from RabbitMQ, or externalize via etcd).
 
+### Mnesia under partition
+
+Mnesia ships with OTP and is tempting when you want in-cluster replicated state. It is also the single most common source of BEAM production incidents people blog about, for one reason: **its partition behaviour is AP with no arbitration**.
+
+```
+                 netsplit
+Node A ────X──────────── Node B
+  │                        │
+  ↓ both sides keep        ↓
+  writing to the same
+  Mnesia table
+                 heal
+Node A ──────────────── Node B
+  │                        │
+  ↓ :mnesia_monitor emits  ↓
+  {:inconsistent_database, _, _}
+  and stops replicating
+  (cluster is now silently degraded)
+```
+
+**What to plan for:**
+
+1. **Subscribe to `:mnesia.subscribe(:system)`** so an `:inconsistent_database` event is *visible*, not just written to a log nobody reads. Page on it.
+2. **Decide the arbitration rule up front.** Usual answer: the partition with the highest node count wins; the minority restarts and re-seeds from the winner. Formalise this in a runbook — it will not happen automatically.
+3. **`:master_nodes` helps only on startup.** It tells a booting node which peer's copy to trust. It does not resolve a running split.
+4. **Dirty operations do not arbitrate.** `:mnesia.dirty_write/1` skips both locks and replication semantics. After a split heal, dirty writes on the losing side are just gone.
+5. **`extra_db_nodes` at boot.** If a node starts without seeing its peers, it comes up as a standalone cluster of one. Two nodes booting simultaneously without seeing each other create two clusters — then a "heal" is really a first-contact collision. Use a coordinated boot (e.g. wait for `libcluster` to converge before calling `:mnesia.start/0`).
+
+**Safe uses of Mnesia in new code:** ephemeral state whose loss on heal is acceptable (session tokens with short TTL, presence, caches). For anything else, reach for Khepri or an external store.
+
+### Khepri under partition
+
+Khepri (`:khepri` on Hex, built on `:ra`, the RabbitMQ team's Raft implementation) gives the opposite tradeoff: **CP with automatic arbitration**.
+
+- **Writes require a majority quorum.** 3-node cluster: 1 node down = writes OK, 2 down = writes blocked. 5-node cluster: 2 down = writes OK, 3 down = blocked.
+- **The minority partition stops accepting writes.** Reads may be served stale (or blocked, depending on consistency level asked for). The minority catches up via Raft log replay when it rejoins.
+- **Cluster membership is itself Raft-managed.** You don't have `extra_db_nodes`-style boot races; adding/removing a member is a linearizable operation that either commits or doesn't.
+- **Quorum math drives cluster size.** 2-node Khepri is worse than useless — any single failure halts writes. Plan odd sizes ≥3. For "no single point of failure," 3 is the minimum; 5 tolerates two simultaneous failures.
+- **Same LAN assumption as all BEAM distribution.** Raft heartbeats don't cross regions well. Keep Khepri clusters inside one failure domain and bridge across regions with something else.
+
+**Mental model:** Khepri is the same kind of thing as etcd, but inside your BEAM and using Distributed Erlang for transport. The tradeoffs are the tradeoffs of any Raft-based KV.
+
+### Choosing which to use
+
+| Property you need | Pick |
+|---|---|
+| "We keep serving writes on both sides of a split and deal with it later" | Mnesia — but you own the arbitration |
+| "Minority side must refuse writes; we cannot tolerate divergence" | Khepri |
+| "We want an external, battle-tested CP store" | etcd / Consul / Postgres over HTTP |
+| "We want a Raft library we compose ourselves" | `:ra` directly (Khepri is a state machine on top of `:ra`) |
+| "Writes must never block, loss on heal is fine" | Mnesia with an arbitration runbook |
+
+See [data-ownership-deep.md §12](data-ownership-deep.md#12-beam-native-data-stores--mnesia-and-khepri) for the ownership-level discussion (schema story, Postgres-vs-BEAM-native decision, backup/restore).
+
+### Interaction with `:global` and `:net_kernel`
+
+Both stores use Distributed Erlang, so they inherit its failure detector:
+
+- `:net_kernel.monitor_nodes(true)` tells you when BEAM sees a peer drop. Mnesia's partition view follows from the same signal — if `:net_kernel` considers a peer down, Mnesia considers that replica down.
+- **`:global`'s cluster-wide lock can deadlock during a partition.** Mnesia uses `:global` for some schema operations (e.g. `:mnesia.change_config/2`). If you do schema changes during a partition, expect hangs. Schedule schema changes during known-healthy windows, or use `:mnesia.change_table_copy_type/3` with a timeout discipline.
+- **`net_ticktime` matters.** Default is 60s, so a partition is only declared after ~45–75s of silence. Shorter ticktime detects faster but false-positives on GC pauses — tune only with data.
+
 ---
 
 ## 8. Cluster formation with `libcluster`
@@ -455,6 +517,9 @@ Answer yes to at least two:
 ## Cross-References
 
 - **Implementation templates** (`:erpc` call, libcluster config, Horde usage): `../elixir-implementing/otp-callbacks.md`
+- **Mnesia / Khepri implementation** (transactions, boot, schema evolution): `../elixir-implementing/beam-databases.md`
+- **Store-choice planning** (Mnesia vs Khepri vs Postgres, ownership implications): `./data-ownership-deep.md` §12
+- **BEAM-native DB anti-patterns** (split-brain watcher, determinism, quorum sizing): `../elixir-reviewing/anti-patterns-catalog.md` §H
 - **Integration patterns inside a single node**: `./integration-patterns.md`
 - **Growing architecture — when distribution becomes justified**: `./growing-evolution.md`
 - **Actor model and message semantics**: `./process-topology.md` §0

@@ -46,7 +46,7 @@ The core SKILL.md carries the always-loaded rules, severity guidance, workflow, 
 
 | Subskill | Purpose | Load when... |
 |---|---|---|
-| [anti-patterns-catalog.md](anti-patterns-catalog.md) | Organized anti-patterns by category (code, process/OTP, Ecto/data, architecture/design, testing, security, config) with BAD/GOOD for each | General review / scanning a diff for named anti-patterns |
+| [anti-patterns-catalog.md](anti-patterns-catalog.md) | Organized anti-patterns by category (code, process/OTP, Ecto/data, architecture/design, testing, security, config, **BEAM-native DB — Mnesia/Khepri**) with BAD/GOOD for each | General review / scanning a diff for named anti-patterns |
 | [debugging-playbook-deep.md](debugging-playbook-deep.md) | Symptom → diagnosis flow for crashes, mailbox buildup, memory growth, slow response, flaky tests, Dialyzer warnings, CPU pegging | Investigating a specific bug |
 | [profiling-playbook-deep.md](profiling-playbook-deep.md) | Tool selection + usage: `:timer.tc`, Benchee, fprof/eprof/cprof/tprof, `:recon`, `:observer`, telemetry, memory analysis | Measuring or optimizing performance |
 | [performance-catalog.md](performance-catalog.md) | 32 common pitfalls with symptom → root cause → fix (data structures, Enum/Stream, OTP, Ecto, memory, serialization, Phoenix) | Looking for performance issues in a review |

@@ -36,11 +36,11 @@ This SKILL.md covers the decision tables and quick-reference material. For depth
 | [process-topology.md](process-topology.md) | Supervision tree design, error kernel, process-per-service vs per-entity, instructions pattern, callback module pattern | Designing the supervision tree; placing processes |
 | [otp-design.md](otp-design.md) | OTP construct choice — GenServer vs Task vs Agent vs `:gen_statem` vs ETS vs `:persistent_term` vs GenStage/Broadway vs Oban | Picking the OTP primitive for a use case |
 | [integration-patterns.md](integration-patterns.md) | Six inter-context mechanisms in depth, capacity planning, escalation path, sagas, process managers | Designing how contexts / services communicate |
-| [data-ownership-deep.md](data-ownership-deep.md) | Aggregates, multi-tenancy strategies, cross-context transactions, sagas, idempotency | Designing the data model, tenant isolation, retry-safe operations |
+| [data-ownership-deep.md](data-ownership-deep.md) | Aggregates, multi-tenancy strategies, cross-context transactions, sagas, idempotency, **BEAM-native stores (Mnesia vs Khepri vs Postgres) — consistency model, ownership implications, backup/restore, planning checklist** | Designing the data model, tenant isolation, retry-safe operations, choosing between Postgres and BEAM-native stores |
 | [test-strategy.md](test-strategy.md) | Test pyramid, mock boundaries, factory architecture, async isolation design, CI strategy, contract tests | Planning test infrastructure at project start; fixing slow/flaky suites |
 | [networking-design.md](networking-design.md) | TCP/UDP server architecture, active vs passive mode, protocol framing, connection supervision, TLS placement | Designing a network server or protocol |
 | [growing-evolution.md](growing-evolution.md) | Stage 1→2→3 evolution, refactoring decision tree, when to split / merge / escalate mechanisms | Growing an existing app; deciding whether a refactor is needed |
-| [distributed-elixir.md](distributed-elixir.md) | Multi-node design — cross-node communication (`:erpc`, `:pg`), distributed registries (Horde, `:global`), state distribution (owner/replicated/sharded), partition handling, libcluster topology, distribution anti-patterns | Designing multi-node / clustered / multi-region deployments |
+| [distributed-elixir.md](distributed-elixir.md) | Multi-node design — cross-node communication (`:erpc`, `:pg`), distributed registries (Horde, `:global`), state distribution (owner/replicated/sharded), partition handling, **Mnesia (AP, no arbitration) and Khepri (Raft/CP) under partition, quorum math**, libcluster topology, distribution anti-patterns | Designing multi-node / clustered / multi-region deployments |
 
 **Cross-references:** subskills link to each other and to the other main skills' subskills (when they exist) via relative paths.
 
@@ -870,7 +870,7 @@ end
 
 ## 7. Data Ownership & Consistency
 
-> **Depth:** [data-ownership-deep.md](data-ownership-deep.md) — aggregate design, multi-tenancy strategies (row-level/schema-per-tenant/DB-per-tenant), cross-context transactions, sagas, idempotency patterns, data ownership migration path.
+> **Depth:** [data-ownership-deep.md](data-ownership-deep.md) — aggregate design, multi-tenancy strategies (row-level/schema-per-tenant/DB-per-tenant), cross-context transactions, sagas, idempotency patterns, data ownership migration path, and BEAM-native data stores (Mnesia vs Khepri vs Postgres) — when each fits, their consistency models, and the ownership/operational implications.
 
 ### 7.1 Who owns the data?
 
@@ -2356,7 +2356,7 @@ users_with_orders = MyApp.Orders.list_users_with_orders(user_ids)
 
 ## 15. Distributed Architecture — Mostly Don't
 
-> **Depth:** [distributed-elixir.md](distributed-elixir.md) — full coverage including node topology, cross-node communication (`:erpc`, `:pg`, `Phoenix.PubSub`), distributed registries (`:global`, Horde, Syn), state distribution patterns (owner-based, replicated/CRDT, sharded, external store), partition handling and netsplit strategies, `libcluster` cluster formation, observability, decision framework, and distribution anti-patterns.
+> **Depth:** [distributed-elixir.md](distributed-elixir.md) — full coverage including node topology, cross-node communication (`:erpc`, `:pg`, `Phoenix.PubSub`), distributed registries (`:global`, Horde, Syn), state distribution patterns (owner-based, replicated/CRDT, sharded, external store), partition handling and netsplit strategies, Mnesia (AP, no arbitration) and Khepri (Raft/CP) under partition with quorum math, `libcluster` cluster formation, observability, decision framework, and distribution anti-patterns.
 
 **The one rule that matters:** most Elixir apps don't need distribution. Exhaust single-node options first.
 

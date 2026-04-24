@@ -956,7 +956,116 @@ This is sufficient for planning the data layer. Implementation follows.
 
 ---
 
-## 12. Cross-references
+## 12. BEAM-native data stores — Mnesia and Khepri
+
+Most Elixir apps should store persistent business data in **PostgreSQL via Ecto**. Mnesia and Khepri exist for a narrower niche: **state the Elixir cluster owns and wants to serve without a round trip to an external database** — schema/config registries, session or presence state in a closed cluster, feature-flag distribution, leader-elected coordination, authorisation caches.
+
+They are not "distributed Postgres." They trade ops maturity for in-cluster locality, and each has distinct consistency semantics that drive the ownership decision.
+
+### 12.1 What each one is
+
+**Mnesia** — ships with OTP. Table-oriented, tuple-valued rows, runs inside every BEAM node. Transactions use per-table read/write locks (pessimistic in-cluster, optimistic across nodes). Each table replica is `ram_copies`, `disc_copies`, or `disc_only_copies` — choose per node, per table. **No built-in arbitration on netsplit heal**: both partitions keep accepting writes; on reconnect Mnesia emits `{:inconsistent_database, _, _}` and leaves resolution to you (usually "restart the loser, lose its writes").
+
+**Khepri** — written by the RabbitMQ team, stable since RabbitMQ 3.13 and now the default metadata store in RabbitMQ 4.x, explicitly because of Mnesia's split-brain footguns. Tree-structured (paths like `[:app, :config, :limits]` map to arbitrary Erlang terms). Backed by `:ra`, the Raft implementation. Strong consistency within a majority quorum; **minority partitions lose write availability** (CP in CAP). Cluster membership is itself a Raft-managed state.
+
+**Comparison at a glance:**
+
+| Property | Mnesia | Khepri |
+|---|---|---|
+| Ships with | OTP | Hex dep (`:khepri`) |
+| Model | Tables of tuples | Tree of terms |
+| Consistency | Optimistic / per-table locks | Linearizable (Raft) |
+| Partition behaviour | AP — both sides write, diverge | CP — minority loses writes |
+| Heal strategy | App-level (restart the loser) | Automatic (Raft log replay) |
+| Storage tiers | `ram` / `disc` / `disc_only` per node | Disc-backed log, RAM state machine |
+| Schema evolution | `:mnesia.transform_table/3` | Free-form tree; version in paths |
+| Cluster membership | `extra_db_nodes` + manual dance | Raft add/remove member |
+| Works across partition heal without data loss? | **No** | Yes (within quorum) |
+| Ecosystem age | 1990s, battle-worn | Modern, smaller userbase |
+
+### 12.2 Decision: Mnesia, Khepri, Postgres, or ETS?
+
+| Situation | Store |
+|---|---|
+| Persistent business data (users, orders, invoices) | **Postgres + Ecto** — the default. Don't deviate without a reason you can name. |
+| Cache or derived state local to one node | **ETS** — no replication, rebuild on restart |
+| Cache shared across the cluster, loss-tolerant | **`:pg` / Phoenix.Tracker** for pid-level, or **Redis** for KV |
+| Cluster-wide metadata / config / feature flags that must stay strongly consistent | **Khepri** — Raft gives you the heal story |
+| Cluster-wide coordination state where "lose minority writes on partition" is an outright blocker and you can tolerate app-level resolution | **Mnesia** — but read §12.3 first |
+| RabbitMQ-embedded Elixir or legacy Erlang system that already uses Mnesia | **Mnesia** — you've inherited it |
+| Multi-region / cross-cluster replication | **None of these** — use an external system (Postgres logical rep, CockroachDB, FoundationDB) |
+
+**Heuristic:** if you're asking "should this be in Mnesia or Postgres?", the answer is almost always Postgres. The bar for Mnesia in new code is: *I have a specific need for in-cluster replicated state that a round trip to Postgres can't satisfy, AND I can live with manual split-brain resolution.* If you clear the first bar but not the second, use Khepri.
+
+### 12.3 Ownership implications
+
+The single-owner rule from §2 still applies: one context owns a table (Mnesia) or a subtree (Khepri), and that context is the only writer.
+
+But BEAM-native stores change a few things the rule doesn't cover:
+
+1. **Schema lives in code, not a migration system.** `:mnesia.create_table/2` runs at boot; Khepri paths are created by the writing context. The "migration file" is absent — version your schema changes in the owning context's boot logic (e.g. a `Mnesia.Schema` module with explicit `ensure_table/1` functions).
+2. **Backup/restore is per-node, not per-database.** `pg_dump` has no equivalent. Mnesia's `:mnesia.backup/1` dumps a single node's view; Khepri's snapshot is a Raft log checkpoint. Plan the operational story (off-node archival, PITR) before you commit.
+3. **The cluster IS the database.** A node joining the cluster joins the database. Rolling deploys, version skew, and schema migrations become cluster-coordination problems. Postgres was a single independent server; Mnesia/Khepri are part of your supervision tree.
+4. **You cannot `psql` into it during an incident.** All debugging goes through IEx and Erlang term output. Plan for this — build a context API for read queries before prod.
+5. **No foreign keys into Postgres.** If the Mnesia-owned `Sessions` table references the Postgres-owned `users.id`, there is no referential integrity — the Postgres DELETE doesn't cascade. Either accept the dangling-reference risk (common for session state) or keep both in the same store.
+
+### 12.4 Why Mnesia is so often the wrong choice
+
+Mnesia in Elixir is famous for three failure modes:
+
+1. **Silent split-brain.** Both partitions accept writes during a netsplit. On heal, Mnesia stops replicating and emits `:inconsistent_database`. If nobody's watching, the cluster runs in degraded mode indefinitely. Resolution requires restarting one side and losing its writes.
+2. **Schema changes under load.** `:mnesia.transform_table/3` locks the table and rewrites every row. On a large table this stalls the whole cluster.
+3. **Boot ordering.** Mnesia must start before your application supervision tree and know its peers (`extra_db_nodes`). Get the boot dance wrong and you end up with N disconnected copies claiming to be authoritative.
+
+These are not bugs — they are the design. Mnesia was built for closed, trusted, LAN-era Erlang systems where the operator was a BEAM expert. If that describes your team and your ops story, fine. If it doesn't, pick Khepri or Postgres.
+
+### 12.5 Khepri's tradeoffs
+
+Khepri removes the split-brain footgun at the cost of:
+
+- **Writes need quorum.** In a 3-node cluster, one node down is fine; two down and writes stop until a node returns. In a 2-node cluster, *either* node down stops writes. Plan cluster sizes in odd numbers ≥3 for real availability.
+- **No cross-region clusters.** Raft heartbeats don't tolerate inter-region latency well. Keep the cluster in one failure domain.
+- **Smaller ecosystem.** Fewer blog posts, fewer Stack Overflow answers, fewer people on your team who've operated it in anger.
+- **Tree model, not tables.** Joins, indexes, ad-hoc queries — Khepri doesn't do them. If the access pattern isn't "give me the value at this path," you're fighting the model.
+
+Khepri is the right answer for cluster metadata. It is not the right answer for your orders table.
+
+### 12.6 Integration with Ecto-owned data
+
+BEAM-native stores and Ecto-owned tables coexist in the same app. Keep the ownership boundary crisp:
+
+```elixir
+# GOOD — Session context owns Mnesia; Accounts owns Postgres; no cross-writes
+defmodule MyApp.Sessions do
+  def put(session_id, user_id), do: :mnesia.transaction(fn -> :mnesia.write({Session, session_id, user_id}) end)
+  def get(session_id), do: :mnesia.transaction(fn -> :mnesia.read({Session, session_id}) end)
+end
+
+defmodule MyApp.Accounts do
+  def delete_user(user) do
+    Repo.delete(user)
+    MyApp.Sessions.purge_for_user(user.id)   # Explicit, because FK doesn't exist
+  end
+end
+```
+
+**Anti-pattern:** the same context writing "half in Mnesia, half in Postgres" for one logical transaction. There is no cross-store transaction — you will get partial writes. Pick one store per aggregate.
+
+### 12.7 Planning checklist
+
+Before committing to Mnesia or Khepri, answer:
+
+1. **What fails if we lose this data?** If the answer is "the cluster rebuilds it from Postgres in 30 seconds," ETS or `:pg` is fine. If it's "we lose billing state," use Postgres.
+2. **What's our split-brain story?** Write it down. For Mnesia this is a runbook, not a library setting.
+3. **Who backs it up?** Name the job, the target, the retention. "The BEAM nodes have disc_copies" is not a backup strategy.
+4. **How do we change the schema in production?** Walk through the sequence with a real table size.
+5. **Who on the team has operated this in production?** If the answer is "nobody," the on-call load during the first incident is the hidden cost.
+
+If every answer is concrete, proceed. If any is hand-waved, use Postgres and revisit when the need is sharper.
+
+---
+
+## 13. Cross-references
 
 ### Within this skill
 
@@ -964,11 +1073,14 @@ This is sufficient for planning the data layer. Implementation follows.
 - [architecture-patterns.md](architecture-patterns.md) §6–7 — event-driven + CQRS context ownership
 - [integration-patterns.md](integration-patterns.md) §6, §8 — Oban for idempotent retries; sagas and process managers
 - [process-topology.md](process-topology.md) — supervision for multi-tenancy
+- [distributed-elixir.md](distributed-elixir.md) §7 — Mnesia and Khepri partition behaviour, quorum math
 
 ### In other skills
 
 - [../elixir-implementing/SKILL.md](../elixir-implementing/SKILL.md) §10.4 — context-level query patterns, preload
+- [../elixir-implementing/beam-databases.md](../elixir-implementing/beam-databases.md) — Mnesia / Khepri implementation templates, boot ordering, schema evolution
 - [../elixir-reviewing/SKILL.md](../elixir-reviewing/SKILL.md) §7.1 — reviewing data ownership violations
+- [../elixir-reviewing/anti-patterns-catalog.md](../elixir-reviewing/anti-patterns-catalog.md) §H — BEAM-native DB anti-patterns
 - `event-sourcing` skill — Commanded aggregates, projections, process managers
 - `../elixir/ecto-reference.md` — Ecto changeset/query reference
 - `../elixir/ecto-examples.md` — Multi-tenancy, preloading, Multi examples

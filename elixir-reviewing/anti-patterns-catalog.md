@@ -1282,6 +1282,196 @@ def api_key, do: System.fetch_env!("API_KEY")
 
 ---
 
+## H. BEAM-native DB Anti-Patterns (Mnesia / Khepri)
+
+These apply to code that uses `:mnesia` or `:khepri` directly. For deep architectural discussion, see `../elixir-planning/data-ownership-deep.md` §12. For partition semantics, see `../elixir-planning/distributed-elixir.md` §7.
+
+### H1. Mnesia as the primary store for business data
+
+**Why it's bad:** Mnesia's partition behaviour is AP with no arbitration. On netsplit heal, one side's writes are discarded. For business records (users, orders, payments) this is data loss, not graceful degradation. Postgres is the default; Mnesia is for ephemeral cluster state whose loss is acceptable.
+
+```elixir
+# BAD — orders in Mnesia
+:mnesia.create_table(:orders, attributes: [:id, :user_id, :total, :status], disc_copies: [node()])
+
+# GOOD — orders in Postgres; maybe a session cache in Mnesia
+# MyApp.Orders uses Ecto/Repo; MyApp.Sessions uses Mnesia for ephemeral tokens
+```
+
+### H2. Dirty writes for data that must survive a partition
+
+**Why it's bad:** `:mnesia.dirty_write/1` skips both locks and replication coordination. Dirty writes made on the losing side of a partition are silently lost on heal.
+
+```elixir
+# BAD — dirty write on state that must not be lost
+:mnesia.dirty_write({:audit_log, id, user_id, action, timestamp})
+
+# GOOD — transactional write
+:mnesia.transaction(fn -> :mnesia.write({:audit_log, id, user_id, action, timestamp}) end)
+```
+
+Dirty ops are only safe when the caller has named the reason "loss is acceptable" (local caches, metrics counters).
+
+### H3. No `:mnesia.subscribe(:system)` in production
+
+**Why it's bad:** Split-brain is Mnesia's default, not an exception. Without a subscriber, `:inconsistent_database` events go to logs nobody reads and the cluster runs silently degraded.
+
+```elixir
+# BAD — Mnesia.start() called but no watcher
+def start(_, _), do: Supervisor.start_link([...], strategy: :one_for_one)
+
+# GOOD — supervised watcher that pages on :inconsistent_database
+children = [
+  MyApp.Mnesia.Bootstrap,
+  MyApp.Mnesia.Watcher,   # :mnesia.subscribe(:system) + alert on inconsistent_database / mnesia_overload
+  ...
+]
+```
+
+### H4. Overlapping Mnesia and Ecto ownership for one aggregate
+
+**Why it's bad:** No cross-store transaction exists. A "write the order to Postgres, update the summary in Mnesia" flow fails partially under any crash. The aggregate has two sources of truth that disagree.
+
+```elixir
+# BAD — two stores, one aggregate
+def place_order(attrs) do
+  {:ok, order} = Repo.insert(%Order{} = Order.changeset(%Order{}, attrs))
+  :mnesia.transaction(fn -> :mnesia.write({:order_summary, order.user_id, order.total}) end)
+  {:ok, order}
+end
+
+# GOOD — one store per aggregate; the summary is a derived projection
+# Derive summary from Postgres via a query, or maintain it via PubSub → worker
+# with explicit reconciliation.
+```
+
+### H5. Non-deterministic Khepri transaction function
+
+**Why it's bad:** Khepri replays the transaction fun on every Raft member. `System.system_time/0`, `self()`, `:rand.uniform/0`, `Node.self()`, message sends — anything non-deterministic causes each node to apply a *different* state change. The cluster silently corrupts.
+
+```elixir
+# BAD — system_time differs per node
+:khepri.transaction(@store, fn ->
+  :khepri_tx.put([:events, System.system_time()], event)
+end)
+
+# GOOD — compute non-deterministic values outside; pass them in
+now = System.system_time()
+:khepri.transaction(@store, fn ->
+  :khepri_tx.put([:events, now], event)
+end)
+```
+
+This is the Khepri equivalent of a SQL injection: it's not caught by the type system and the symptom shows up far from the cause.
+
+### H6. Blocking work inside a Khepri trigger or projection callback
+
+**Why it's bad:** Triggers run inline on the leader as part of the log applier. HTTP calls, `Logger.info/1` with a slow backend, or `GenServer.call/2` to a contended process all block every subsequent write to the watched path.
+
+```elixir
+# BAD — webhook call in the trigger
+def on_config_change(_path, value) do
+  HTTPClient.post("https://webhook", Jason.encode!(value))   # blocks the applier
+end
+
+# GOOD — hand off to a worker
+def on_config_change(path, value) do
+  send(MyApp.Webhook.Worker, {:changed, path, value})
+  :ok
+end
+```
+
+### H7. 2-node Khepri cluster
+
+**Why it's bad:** Raft needs a majority quorum. With 2 members, majority is 2. Any single failure blocks writes until the failed node returns. A 2-node Khepri is strictly worse than a 1-node Khepri for availability.
+
+```
+# BAD — cluster members: [a@host1, b@host2]
+# host1 crashes → b is minority → all writes blocked
+
+# GOOD — 3 or 5 members, odd count
+# 3 members tolerate 1 failure; 5 tolerate 2
+```
+
+### H8. Mnesia `start/0` without `extra_db_nodes` on a cluster member
+
+**Why it's bad:** A Mnesia node booted without being told its peers forms a standalone cluster of one. Two such nodes booting simultaneously each form their own cluster; a later "heal" is actually a first-contact collision with divergent schemas — Mnesia cannot merge them.
+
+```elixir
+# BAD — node comes up in isolation
+def start(_, _) do
+  :mnesia.start()
+  Supervisor.start_link([...], strategy: :one_for_one)
+end
+
+# GOOD — peer discovery before Mnesia start
+def start(_, _) do
+  peers = MyApp.Discovery.expected_peers()
+  Enum.each(peers, &Node.connect/1)
+  wait_until_peer_visible(peers, 30_000)
+  :mnesia.start()
+  :mnesia.change_config(:extra_db_nodes, peers)
+  Supervisor.start_link([...], strategy: :one_for_one)
+end
+```
+
+### H9. `:mnesia.transform_table/3` under load
+
+**Why it's bad:** `transform_table/3` takes a cluster-wide write lock and rewrites every row. On a large hot table this stalls every writer cluster-wide.
+
+```elixir
+# BAD — run at any time on a large active table
+:mnesia.transform_table(:sessions, &migrate/1, [:id, :user_id, :expires_at, :data, :ip])
+
+# GOOD — additive migration: new table, dual-write, backfill, cutover, drop old
+# 1. Create :sessions_v2 with the new shape
+# 2. Writers dual-write to both tables
+# 3. Backfill :sessions_v2 from :sessions
+# 4. Readers switch to :sessions_v2
+# 5. Drop :sessions
+```
+
+Same three-phase pattern as Postgres destructive migrations (C8).
+
+### H10. Raw Mnesia tuples / Khepri paths leaking out of the context
+
+**Why it's bad:** Callers encode the store's internal shape. Any schema change breaks every caller. Same abstraction violation as C6 ("returning a query from a context").
+
+```elixir
+# BAD — caller depends on tuple position
+def get_session(id), do: :mnesia.dirty_read({:sessions, id})
+# Elsewhere: {_, ^id, user_id, _, _} = Sessions.get_session(id)  ← brittle
+
+# GOOD — context returns a domain struct
+def get_session(id) do
+  case :mnesia.transaction(fn -> :mnesia.read({:sessions, id}) end) do
+    {:atomic, [{:sessions, ^id, user_id, expires_at, data}]} ->
+      {:ok, %Session{id: id, user_id: user_id, expires_at: expires_at, data: data}}
+    {:atomic, []} -> :error
+  end
+end
+```
+
+### H11. Long work inside `:mnesia.transaction/1`
+
+**Why it's bad:** Transactions hold locks and retry on conflict. IO inside a transaction runs every retry, holds locks longer than necessary, and makes deadlock-detection traces useless. Same category as C9 ("long work inside `Repo.transaction`").
+
+```elixir
+# BAD
+:mnesia.transaction(fn ->
+  user = :mnesia.read({Users, id})
+  WebhookClient.notify(user)   # network IO under lock
+  :mnesia.write(updated(user))
+end)
+
+# GOOD — read, commit, then side effects
+{:atomic, user} = :mnesia.transaction(fn -> :mnesia.read({Users, id}) end)
+WebhookClient.notify(user)
+:mnesia.transaction(fn -> :mnesia.write(updated(user)) end)
+```
+
+---
+
 ## Cross-References
 
 - **Performance-specific anti-patterns** (with symptom → root cause → fix → evidence): `./performance-catalog.md`
