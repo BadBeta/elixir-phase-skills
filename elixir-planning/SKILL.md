@@ -36,22 +36,127 @@ This SKILL.md covers the decision tables and quick-reference material. For depth
 | [process-topology.md](process-topology.md) | Supervision tree design, error kernel, process-per-service vs per-entity, instructions pattern, callback module pattern | Designing the supervision tree; placing processes |
 | [otp-design.md](otp-design.md) | OTP construct choice — GenServer vs Task vs Agent vs `:gen_statem` vs ETS vs `:persistent_term` vs GenStage/Broadway vs Oban | Picking the OTP primitive for a use case |
 | [integration-patterns.md](integration-patterns.md) | Six inter-context mechanisms in depth, capacity planning, escalation path, sagas, process managers | Designing how contexts / services communicate |
-| [data-ownership-deep.md](data-ownership-deep.md) | Aggregates, multi-tenancy strategies, cross-context transactions, sagas, idempotency, **BEAM-native stores (Mnesia vs Khepri vs Postgres) — consistency model, ownership implications, backup/restore, planning checklist** | Designing the data model, tenant isolation, retry-safe operations, choosing between Postgres and BEAM-native stores |
+| [data-ownership-deep.md](data-ownership-deep.md) | Aggregates, multi-tenancy strategies, cross-context transactions, sagas, idempotency | Designing the data model, tenant isolation, retry-safe operations |
 | [test-strategy.md](test-strategy.md) | Test pyramid, mock boundaries, factory architecture, async isolation design, CI strategy, contract tests | Planning test infrastructure at project start; fixing slow/flaky suites |
 | [networking-design.md](networking-design.md) | TCP/UDP server architecture, active vs passive mode, protocol framing, connection supervision, TLS placement | Designing a network server or protocol |
 | [growing-evolution.md](growing-evolution.md) | Stage 1→2→3 evolution, refactoring decision tree, when to split / merge / escalate mechanisms | Growing an existing app; deciding whether a refactor is needed |
-| [distributed-elixir.md](distributed-elixir.md) | Multi-node design — cross-node communication (`:erpc`, `:pg`), distributed registries (Horde, `:global`), state distribution (owner/replicated/sharded), partition handling, **Mnesia (AP, no arbitration) and Khepri (Raft/CP) under partition, quorum math**, libcluster topology, distribution anti-patterns | Designing multi-node / clustered / multi-region deployments |
+| [distributed-elixir.md](distributed-elixir.md) | Multi-node design — cross-node communication (`:erpc`, `:pg`), distributed registries (Horde, `:global`), state distribution (owner/replicated/sharded), partition handling, libcluster topology, distribution anti-patterns | Designing multi-node / clustered / multi-region deployments |
+| [long-running-projects.md](long-running-projects.md) | Meta-workflow for projects spanning multiple sessions and milestones: the three-document model (`PLAN.md` / `continue.md` / commit messages), milestone-boundary checklist (incl. Ecto-specific invariants), SSOT invariant verification (`mix` commands + greps), pending-items pruning, cross-session handoff quality, hibernation preparation. | Starting/resuming a long-running project; writing `continue.md`; milestone commit discipline |
 
 **Cross-references:** subskills link to each other and to the other main skills' subskills (when they exist) via relative paths.
 
 ## How to use this skill
 
-1. **Starting a new project?** — Read §1 (Rules), §2 (Planning Workflow), §5 (Project Layout). Walk through the decisions in sequence.
-2. **Adding a new feature to an existing project?** — §2 (Planning Workflow), §3 (Master Decision Table). Check §6 (do I need a new context?) and §8 (do I need a new process?).
+1. **Starting a new project?** — Read §0 (Plan-Completeness Gate) first, then §1 (Rules), §2 (Planning Workflow), §5 (Project Layout). Walk through the decisions in sequence.
+2. **Adding a new feature to an existing project?** — §0 (Plan-Completeness Gate), §2 (Planning Workflow), §3 (Master Decision Table). Check §6 (do I need a new context?) and §8 (do I need a new process?).
 3. **Refactoring?** — §13 (Growing Architecture) to identify where you are, §14 (Anti-patterns) to find what to fix, §6 and §9 for context/integration rework.
 4. **Choosing how two parts of the system should talk?** — §9 (Inter-Context Communication) — the 6 mechanisms and the decision guide.
 5. **Designing for failure?** — §11 (Resilience) — where circuit breakers, retries, and degradation live.
-6. **About to write code?** — Load `elixir-implementing` alongside this skill.
+6. **About to write code?** — Verify the plan passes §0 before handing off. Load `elixir-implementing` alongside this skill.
+
+**Scope — what this skill does NOT cover:**
+
+- Moment-of-writing construct choice (`if`/`case`/`with`/multi-clause, Enum vs Stream, pipeline shape) → `elixir-implementing`.
+- Individual library selection (which HTTP client, which JSON lib) — this skill gives the boundary shape (behaviour); the library is an implementation detail.
+- Runtime debugging, performance profiling, and post-hoc review → `elixir-reviewing`.
+- Long-form architecture decision records (ADRs) — the skill gives the decisions but not the prose document format.
+
+---
+
+## 0. The Plan-Completeness Gate ⛔
+
+**Stop. A plan is not a plan until it is complete.** A plan with stubs, TODOs, "we'll figure this out later", or named-but-unresolved questions is a partial plan — and a partial plan is how production bugs get *designed in* rather than typed in.
+
+### 0.1 The gate — a plan is complete when…
+
+Every item below has a concrete answer before any implementation begins. If any answer is "TBD", "we'll pick later", "something like X", or "depends", the plan is incomplete. Go resolve it before coding.
+
+**Layout & boundaries**
+- [ ] Project layout chosen: single app, umbrella (name each sub-app), or poncho (§5).
+- [ ] Every context named with its responsibility in one sentence (§6).
+- [ ] Data ownership: every table/entity has exactly one owning context (§7.1).
+- [ ] Context relationships mapped: caller → callee, and the public API function names that bridge them (§6.5).
+
+**Processes & supervision**
+- [ ] The full supervision tree drawn (ASCII, Mermaid, or list — doesn't matter which, but it must be drawn). Every supervised process named with its restart strategy (§8.3).
+- [ ] Start order justified by dependency order (§8.3).
+- [ ] Every GenServer/Task/Agent/`:gen_statem`/Broadway/Oban worker has a concrete child spec in mind — not "some GenServer" (§8.4).
+- [ ] Registry / DynamicSupervisor decisions named if the app has dynamic processes (§8.6).
+
+**State**
+- [ ] For every piece of state: where it lives (process, ETS, DB, `:persistent_term`, cache) and why (§8.5).
+- [ ] What survives a crash vs what's volatile — explicit per piece of state (§8.2).
+- [ ] Multi-tenancy strategy chosen if applicable — row-level / schema-per-tenant / DB-per-tenant (§7.4).
+
+**Communication**
+- [ ] Every inter-context call path chosen from §9.8 decision guide: direct call / PubSub / Registry / GenStage / Oban / event-sourced.
+- [ ] Every payload (PubSub topic, Oban job args, GenStage event) has a concrete shape — field names and types.
+- [ ] Every cross-context transaction either fits in one aggregate or has a named saga/idempotency strategy (§7.2, §7.3).
+
+**External boundaries**
+- [ ] Every external dependency behind a `@callback` behaviour with the exact callback names and signatures listed (§4.4). No "we'll introduce the behaviour later."
+- [ ] Config keys named for each adapter swap (test/stub vs prod) — including the exact `config :my_app, MyBoundary, ...` line.
+- [ ] Every external call's failure mode classified: retry / circuit break / degrade / propagate (§11.2–11.4).
+
+**Configuration**
+- [ ] Every config value classified as compile-time vs runtime (§3.10, §10.2).
+- [ ] runtime.exs validation strategy chosen: which env vars are required, what the error message says (§10.4, §13.X runtime.exs discipline).
+- [ ] Config-accessor module named (§10.5 — see Config-module shape).
+
+**Resilience**
+- [ ] Every timeout chain cascaded: endpoint → GenServer.call → HTTP client — with numbers (§11.5).
+- [ ] Every retryable operation either idempotent by design or has a dedup/idempotency key strategy (§7.3).
+
+**Test strategy**
+- [ ] For each context: which functions are unit-tested, which are property-tested, which need integration tests against the boundary (§test-strategy).
+- [ ] Mock boundaries chosen (Mox for behaviours, sandbox for Repo) — not "we'll mock something."
+
+### 0.2 Stubs, TODOs, and "later" — banned
+
+The following phrases signal an incomplete plan. Hunt them, kill them, replace them with concrete decisions **before** handing off to implementation:
+
+| Phrase in a plan | Replace with |
+|---|---|
+| "TODO: pick a library" | The library name + version, installed via `mix.exs` |
+| "We'll introduce a behaviour when needed" | The `@callback` signatures, now |
+| "Some kind of PubSub event" | Topic name + payload field/type list |
+| "Stubbed for milestone N, wired later" | Delete the milestone split or finish the wiring now |
+| "Config TBD" | The exact `config :app, Key, value` line |
+| "Retry strategy to be determined" | A named strategy (bounded retries with backoff X, circuit breaker, or propagate) |
+| "Validate the env var later" | The validator function and its error message |
+| "Module-level TODO for error handling" | The error-return shape and who catches it |
+
+**A plan that contains any of these phrases is not done.** Do not begin implementation. Do not commit the plan. Resolve the decision now — planning is 10× cheaper than fixing a wrong decision discovered mid-implementation.
+
+### 0.3 Why plans fail mid-implementation
+
+The failure mode this gate prevents:
+
+1. A plan is written with "good-enough" placeholders.
+2. Implementation begins on well-specified parts.
+3. When implementation reaches a placeholder, the decision is now made under pressure (velocity, context switches, sunk-cost fallacy for what's already built).
+4. The late decision either constrains an already-built piece (causing rework) or is deferred again (causing architectural drift).
+5. The drifted architecture ships. Discovered in review or production.
+
+Every TODO in a plan is a decision moved from cheap (planning) to expensive (under-pressure-mid-build).
+
+### 0.4 Milestone splits are not placeholders
+
+Splitting implementation into milestones (M1, M2, M3…) is fine and often correct. But the **decisions** for all milestones must be made at planning time. M3's supervision shape is decided at planning time even if M3's code is written last. "We'll design M3 when we get there" means you haven't planned.
+
+Acceptable milestone split: "M1 wires the scaffold with the M3-decided behaviour trait; M2 adds the adapter; M3 adds the scheduler." All three shapes are known.
+
+Unacceptable: "M1 gets us running; M2/M3 TBD." That's one milestone and a shrug.
+
+### 0.5 The completion check before handoff
+
+Before declaring planning done and loading `elixir-implementing`:
+
+1. Read the plan end-to-end.
+2. Grep the plan text for: `TODO`, `TBD`, `later`, `figure out`, `decide when`, `something like`, `probably`, `maybe`. Any hit → incomplete.
+3. For each ✔ in §0.1, confirm it's answered with a concrete noun (a name, a type, a number, a function signature), not an adjective.
+4. If the plan passes, commit it (or stamp it done) and proceed to implementation.
+5. If it fails, return to the failed items and resolve them. Planning iteration is cheap.
 
 ---
 
@@ -77,6 +182,7 @@ This SKILL.md covers the decision tables and quick-reference material. For depth
 18. **ALWAYS start with direct function calls** between contexts. Escalate to PubSub when you need decoupling, GenStage when you need backpressure, Oban when events must survive restarts, event sourcing when you need audit/replay. Don't pre-select the complex solution.
 19. **NEVER introduce distribution (multi-node clustering) until single-node is maxed out.** `Task.async_stream`, process pools, Broadway, read replicas — exhaust these first. Distribution brings network partitions, split-brain, and eventual consistency.
 20. **ALWAYS hand off to `elixir-implementing` for the actual code.** This skill decides *what to build*; the implementing skill covers *how to type it idiomatically*.
+21. **ALWAYS pass the plan-completeness gate (§0) before handing off.** A plan with TODOs, "TBD", "we'll pick later", or unresolved decisions is not a plan — it's a partial plan that will force decisions under pressure mid-implementation. Every checklist item in §0.1 must have a concrete noun answer (a name, a type, a signature, a number) before implementation begins. This rule has priority over all others: an incomplete plan poisons every downstream decision.
 
 ---
 
@@ -148,6 +254,7 @@ This is the spine of the skill. Every major architectural question maps to a row
 |---|---|---|
 | New project, one team, one deployable | Single Mix application + contexts | §5.1 |
 | New project, multiple teams with hard boundaries | Umbrella | §5.2 |
+| New project, cleanly separate runtime deployables (central API + edge worker + shared payload lib) | Umbrella with one app per deployable + a shared `*_wire` app for cross-deploy types | §5.2 |
 | New project, apps need different dep versions | Poncho | §5.3 |
 | Building a reusable library (will be a Hex dep) | Single Mix application, NO supervision tree, behaviour-based extension points | §5.3 (Library vs App) |
 | "Should I split this monolith?" | **Almost certainly no.** Add contexts first. | §13 (Growing Architecture) |
@@ -870,7 +977,7 @@ end
 
 ## 7. Data Ownership & Consistency
 
-> **Depth:** [data-ownership-deep.md](data-ownership-deep.md) — aggregate design, multi-tenancy strategies (row-level/schema-per-tenant/DB-per-tenant), cross-context transactions, sagas, idempotency patterns, data ownership migration path, and BEAM-native data stores (Mnesia vs Khepri vs Postgres) — when each fits, their consistency models, and the ownership/operational implications.
+> **Depth:** [data-ownership-deep.md](data-ownership-deep.md) — aggregate design, multi-tenancy strategies (row-level/schema-per-tenant/DB-per-tenant), cross-context transactions, sagas, idempotency patterns, data ownership migration path.
 
 ### 7.1 Who owns the data?
 
@@ -1223,6 +1330,74 @@ defmodule MyApp.GameManager do
   def find_game(game_id), do: MyApp.GameRegistry.lookup(game_id)
 end
 ```
+
+**Canonical template — per-entity supervision with boot replay:**
+
+The complete shape for "one process per live entity, with all entities re-hydrated on boot" is a four-piece subtree under a `:one_for_all` supervisor. This is the template that drops into most IoT / per-game / per-session apps:
+
+```elixir
+defmodule MyApp.Fleet.Supervisor do
+  use Supervisor
+
+  def start_link(opts), do: Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @impl true
+  def init(_opts) do
+    children = [
+      MyApp.Fleet.Registry,       # 1. via-tuple registry — started first
+      MyApp.Fleet.DynSup,         # 2. DynamicSupervisor — starts/stops entity workers
+      MyApp.Fleet.Boot            # 3. Boot GenServer — replays entities from DB
+    ]
+    # :one_for_all — Registry and DynSup are tightly coupled. If Registry
+    # restarts, DynSup children lose their names; if DynSup restarts, its
+    # children's registrations are orphaned. Restart the whole subtree.
+    Supervisor.init(children, strategy: :one_for_all)
+  end
+end
+
+defmodule MyApp.Fleet.Registry do
+  def child_spec(_), do: Registry.child_spec(keys: :unique, name: __MODULE__)
+  def via(id), do: {:via, Registry, {__MODULE__, id}}
+end
+
+defmodule MyApp.Fleet.DynSup do
+  use DynamicSupervisor
+  def start_link(_), do: DynamicSupervisor.start_link(__MODULE__, :ok, name: __MODULE__)
+  @impl true
+  def init(:ok), do: DynamicSupervisor.init(strategy: :one_for_one)
+
+  def start_worker(id, opts \\ []) do
+    DynamicSupervisor.start_child(__MODULE__, {MyApp.Fleet.Worker, [id: id] ++ opts})
+  end
+end
+
+defmodule MyApp.Fleet.Boot do
+  @moduledoc "On start, replays every persisted entity as a worker process."
+  use GenServer
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, :ok)
+
+  @impl true
+  def init(:ok), do: {:ok, %{}, {:continue, :boot}}
+
+  @impl true
+  def handle_continue(:boot, state) do
+    MyApp.Fleet.list_persisted_ids()
+    |> Enum.each(&MyApp.Fleet.DynSup.start_worker/1)
+    {:noreply, state}
+  end
+end
+```
+
+**Why this shape:**
+
+- Registry started FIRST (Worker `start_link` uses its via-tuple).
+- DynamicSupervisor started SECOND (has no children yet — safe without Registry).
+- Boot started THIRD and uses `handle_continue/2` so `init/1` returns fast (doesn't block the supervisor's start sequence).
+- `:one_for_all` reflects the tight coupling — if any piece dies, restart the whole subtree so re-registrations don't drift.
+- Boot owns the "fleet re-hydration" decision explicitly — there's no magic "processes auto-start somewhere." The module that re-creates N workers is named.
+
+**Use when:** one process per domain entity (devices, games, sessions, customers on a live-seat system). **Skip when:** entities are ephemeral request-scoped (use `Task.Supervisor`) or fully stateless (use pure functions + DB).
 
 ### 8.7 The Instructions Pattern (for complex domain + side-effects)
 
@@ -1602,9 +1777,49 @@ defmodule MyLib.Client do
 end
 ```
 
-### 10.4 Configuration handoff to `elixir-implementing`
+### 10.4 `runtime.exs` validation discipline
 
-The implementation patterns for reading config (at-runtime vs at-boot, `fetch_env!` vs `get_env`) are in `elixir-implementing` §8.6. This section is about **where values live** and **why** — the planning decision.
+`runtime.exs` is where production blows up at boot — so the validation shape is a planning decision, not an implementation detail. Three rules:
+
+1. **Validate the shape** — `System.fetch_env!/1` for required vars (raises clearly if missing); `System.get_env/2` with a typed default for optional ones.
+2. **Bounded parse** — every string that becomes a port, pool size, timeout, URL, or boolean goes through a parser with explicit bounds. Don't feed raw env strings into `String.to_integer/1` without a range check; don't feed them into `String.to_atom/1` at all (atom table exhaustion — see elixir-reviewing §7.10).
+3. **Explicit error message** — when validation fails, the error message says **which env var** was wrong and **what shape** was expected. "Invalid argument" is a production incident waiting to happen.
+
+```elixir
+# config/runtime.exs — shape and validation
+import Config
+
+if config_env() == :prod do
+  database_url =
+    System.get_env("DATABASE_URL") ||
+      raise """
+      DATABASE_URL is required in prod.
+      Expected: ecto://USER:PASS@HOST/DB_NAME
+      """
+
+  pool_size =
+    case System.get_env("POOL_SIZE", "10") |> Integer.parse() do
+      {n, ""} when n in 1..100 -> n
+      _ -> raise "POOL_SIZE must be an integer in 1..100"
+    end
+
+  config :my_app, MyApp.Repo, url: database_url, pool_size: pool_size
+end
+```
+
+**NEVER** use `String.to_atom/1` or `String.to_existing_atom/1` on untrusted env input that can be arbitrary — use an explicit allowlist (`case val do "prod" -> :prod; "stage" -> :stage; ...`).
+
+### 10.5 Config accessor shape — centralize reads
+
+Planning decision: where do config reads *live* in the code? The answer is a single `MyApp.Config` module whose public functions are zero-arg accessors. Every other module routes config reads through it. Scattered `Application.get_env/3` calls across dozens of modules are a persistent anti-pattern — hard to mock consistently, hard to audit, hard to swap in tests.
+
+In an umbrella with separate deployables, each app gets its own `MyApp.Config` (e.g. `Nodepulse.Config` for the central app, `NodepulseEdge.Config` for the edge app). Shared wire/protocol libs use the default Application env pattern so consumers configure them from the outside.
+
+The concrete module shape is in `elixir-implementing` §10.5.1. The planning commitment is: name the module now (e.g. "Nodepulse will have `Nodepulse.Config`"), and every config access goes through it.
+
+### 10.6 Configuration handoff to `elixir-implementing`
+
+The implementation patterns for reading config (at-runtime vs at-boot, `fetch_env!` vs `get_env`, the `MyApp.Config` accessor module) are in `elixir-implementing` §10.5–10.5.1 and §8.6. This section is about **where values live**, **why**, and **how the plan pins down the shape** — the planning decision.
 
 ---
 
@@ -2352,11 +2567,38 @@ users_with_orders = MyApp.Orders.list_users_with_orders(user_ids)
 
 **Microservices are justified for: different languages, compliance isolation, org-level autonomy, or genuinely wildly different scaling needs.** Never for "it feels like it should be."
 
+### 14.14 LiveView stream rendering off external assigns
+
+When a stream row's rendered shape depends on state outside the stream (cluster status, per-member live-computed status, cross-context derivations), attaching that state to a *separate* assign is an architectural bug. LiveView streams are performance-optimized to only re-render rows you re-insert. Updating an unrelated assign (even one the row template reads) does NOT redraw the row — the DOM stays stale.
+
+```
+# BAD — design-time shape
+Socket assigns:
+  :devices (stream)           ← rendered row
+  :device_states (%{id => state}) ← influences row rendering
+  :cluster_status             ← influences row rendering
+
+handle_info({:device_state_changed, ...}) -> update(:device_states, ...)
+  # Row DOM is NOT re-emitted. UI goes stale.
+
+# GOOD — design-time shape
+Device schema has virtual :current_state field.
+Context function: Fleet.list_with_state/0 populates :current_state.
+Stream member carries all row-rendering data.
+
+handle_info({:device_state_changed, id, new_state}) ->
+  stream_insert(socket, :devices, Fleet.get_device_with_state!(id))
+```
+
+**Why this is planning-level, not implementation-level:** the fix is a schema change (virtual field), a context function change (`list_with_state/0`, `get_device_with_state!/1`), and a Postgres-side shape (often a `DISTINCT ON` subquery). If you design the LV tree with "sidecar assigns for row state" you'll discover the problem during integration testing and have to redesign the schema + context. Decide at planning time: **stream members carry everything a row needs to render.** Any state that changes per-row goes on the member, not on a separate assign.
+
+Related implementation guidance: `elixir-implementing` §5.9.
+
 ---
 
 ## 15. Distributed Architecture — Mostly Don't
 
-> **Depth:** [distributed-elixir.md](distributed-elixir.md) — full coverage including node topology, cross-node communication (`:erpc`, `:pg`, `Phoenix.PubSub`), distributed registries (`:global`, Horde, Syn), state distribution patterns (owner-based, replicated/CRDT, sharded, external store), partition handling and netsplit strategies, Mnesia (AP, no arbitration) and Khepri (Raft/CP) under partition with quorum math, `libcluster` cluster formation, observability, decision framework, and distribution anti-patterns.
+> **Depth:** [distributed-elixir.md](distributed-elixir.md) — full coverage including node topology, cross-node communication (`:erpc`, `:pg`, `Phoenix.PubSub`), distributed registries (`:global`, Horde, Syn), state distribution patterns (owner-based, replicated/CRDT, sharded, external store), partition handling and netsplit strategies, `libcluster` cluster formation, observability, decision framework, and distribution anti-patterns.
 
 **The one rule that matters:** most Elixir apps don't need distribution. Exhaust single-node options first.
 

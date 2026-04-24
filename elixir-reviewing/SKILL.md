@@ -40,13 +40,21 @@ This skill is the third in the Elixir family. The three divide labor by phase:
 4. **Writing review comments?** — §6 (Severity), §12 (Comment style).
 5. **Unsure if something is worth flagging?** — §6 Severity Classification.
 
+**Scope — what this skill does NOT cover:**
+
+- Mechanical issues that `mix format`, `credo`, `dialyzer`, or Archdo catch — run those first (§3.0), don't re-flag their findings in a human review.
+- Design from scratch (architecture, context boundaries, supervision tree) → load `elixir-planning`.
+- How to write Elixir idiomatically when implementing fixes → load `elixir-implementing`.
+- Deep security audits beyond the §7.8 checklist → load [security-audit-deep.md](security-audit-deep.md).
+- Production ops / live tracing / distributed debugging under load — this skill covers the *review* side; production forensics is separate.
+
 ### Subskills — deep inspection references
 
 The core SKILL.md carries the always-loaded rules, severity guidance, workflow, checklists, and a tight playbook. For extended depth on a specific area, load the matching subskill:
 
 | Subskill | Purpose | Load when... |
 |---|---|---|
-| [anti-patterns-catalog.md](anti-patterns-catalog.md) | Organized anti-patterns by category (code, process/OTP, Ecto/data, architecture/design, testing, security, config, **BEAM-native DB — Mnesia/Khepri**) with BAD/GOOD for each | General review / scanning a diff for named anti-patterns |
+| [anti-patterns-catalog.md](anti-patterns-catalog.md) | Organized anti-patterns by category (code, process/OTP, Ecto/data, architecture/design, testing, security, config) with BAD/GOOD for each | General review / scanning a diff for named anti-patterns |
 | [debugging-playbook-deep.md](debugging-playbook-deep.md) | Symptom → diagnosis flow for crashes, mailbox buildup, memory growth, slow response, flaky tests, Dialyzer warnings, CPU pegging | Investigating a specific bug |
 | [profiling-playbook-deep.md](profiling-playbook-deep.md) | Tool selection + usage: `:timer.tc`, Benchee, fprof/eprof/cprof/tprof, `:recon`, `:observer`, telemetry, memory analysis | Measuring or optimizing performance |
 | [performance-catalog.md](performance-catalog.md) | 32 common pitfalls with symptom → root cause → fix (data structures, Enum/Stream, OTP, Ecto, memory, serialization, Phoenix) | Looking for performance issues in a review |
@@ -96,6 +104,23 @@ Mixing modes wastes time: full review on a bug report, ad-hoc debugging on a PR 
 ---
 
 ## 3. Review Workflow (PR / diff review)
+
+### 3.0 Layered review — run mechanical tools first
+
+A human review should only contain findings a tool can't produce. Before opening the diff, run (or confirm CI ran) the full mechanical stack:
+
+| Tool | Catches | Out of scope for human review |
+|---|---|---|
+| `mix format --check-formatted` | Formatting | Never flag formatting by hand |
+| `mix compile --warnings-as-errors` | Undefined functions, unused vars, unreachable clauses | These become blocking errors, not review comments |
+| `mix credo --strict` | Style, complexity, consistency, naming | Only flag if Credo misses a pattern that *matters* |
+| `mix dialyzer` | Type mismatches, unreachable patterns, missing `@spec` | See §8.6 for Dialyzer-specific workflow |
+| `mix deps.unlock --check-unused` | Unused deps | Don't review dependencies by hand |
+| Structural / metric tools (Archdo, `:observer_cli`, inch) | Zone-of-Pain / Martin metrics, dead code, cyclic dependencies | Out of human-review scope — delegate |
+
+**Golden rule:** if a tool flags it, don't re-flag it. Your review capital is scarce; spend it on architecture, idiom, subtle correctness, and testability that the tools CAN'T see.
+
+Every review finding should answer: "why wouldn't a linter catch this?" If the answer is "it could", delete the finding.
 
 ### 3.1 Step-by-step
 
@@ -289,6 +314,10 @@ Full reference: `elixir-planning` §14. Flag these if you see them in a diff.
 | Public context function's moduledoc claims atomicity ("both X and Y, or neither") across a DB write AND a non-DB side effect (process-registration, PubSub broadcast, external API call), but the code just does them sequentially and doesn't roll back | Wrap both in `Ecto.Multi.run/3` so the DB row rolls back on side-effect failure, OR remove the atomicity claim and document the recoverable orphan state. Either way: the moduledoc must match the code — this is Rule 13 applied to a specific anti-pattern | Request-change | implementing type-and-docs rule 13 |
 | Moduledoc references a future milestone ("M9 will add Broadway" / "in M12 this becomes atomic") after that milestone has already merged | Rewrite the claim in the present tense describing current behaviour. Milestone-references belong in commit messages and a plan doc, not in each module's `@moduledoc` where they silently decay into lies | Suggest during a rollout; Request-change three milestones after the referenced one merged | implementing type-and-docs rule 13 |
 | LiveView `handle_info` handler for a PubSub message reloads the whole collection from the DB to derive a counter / display state that could be updated from the message content + existing assigns | Change the **broadcast payload** to carry everything the subscriber needs (e.g., `{:device_state_changed, id, old, new}` not `{:device_state_changed, id, new}`) so the LV can update assigns in O(1) instead of re-querying. Never pay N queries per message | Request-change | phoenix-liveview rule 2 + implementing production-patterns |
+| LiveView stream with a row template that reads from a **separate** assign (`@device_states`, `@cluster_status`, `@presence`), and a `handle_info` that changes that sidecar assign to update the row | Stream row DOM is only re-emitted on `stream_insert/3,4` — the sidecar change does NOT redraw the row. Move the state onto the stream member (virtual schema field, `list_with_state/1` context fn) and re-insert on every change. This is architectural: may require a schema change. See implementing §5.9, planning §14.14 | Block | phoenix-liveview + implementing §5.9 |
+| `Repo.insert_all(schema_or_"table", rows)` where a row field is the high-level form of a type that needs dumping: `Ecto.UUID.generate/0` → 36-char hex instead of 16-byte binary; atom for `Ecto.Enum` column; raw `DateTime` for `:utc_datetime_usec` without truncation; custom `Ecto.Type` without `dump/1` | `insert_all` bypasses casts by design. Pass the raw DB representation: `Ecto.UUID.bingenerate/0`, `Atom.to_string/1` for enum columns, `DateTime.truncate(dt, :microsecond)`, `MyType.dump!(value)`. Or use the schema-module form (`Repo.insert_all(Schema, rows)`) so Ecto dumps known fields | Block (silent Postgrex encode errors at runtime) | implementing §10.6.1 |
+| `from b in "string_source", ...` (schemaless query) selecting a `:utc_datetime*` column, and downstream code treats the result as `DateTime.t()` | String-source queries return `NaiveDateTime` (no schema metadata to lift to UTC). Either use a schema-bound query, or normalize at the context boundary: `DateTime.from_naive!(n, "Etc/UTC")`. Downstream `DateTime.diff/3` etc. will crash on `NaiveDateTime` | Request-change | implementing §10.6.2 |
+| GenServer with boot-time subscription via `:net_kernel.monitor_nodes/1,2`, `Phoenix.Tracker`, `Phoenix.PubSub.subscribe/2`, or `Process.monitor/1` against a long-lived target, **without** replaying current state in `handle_continue/2` | Subscriptions only deliver future events. Existing peers / rows / children are invisible. Use `{:ok, state, {:continue, {:retro_scan, Node.list()}}}` and fire the same handler. Pattern applies across `:net_kernel.monitor_nodes`, `Process.monitor` on DynamicSupervisor children, `Phoenix.Presence` on an already-populated topic | Request-change if the GenServer drives business logic from these events; Suggest if telemetry-only | §8.9 retro-scan template |
 
 ### 7.2 Control flow review
 
@@ -445,6 +474,16 @@ Commonly overlooked. Flag any of these.
 | Missing index on a queried foreign key | Add index in migration | Request-change (if queried often) |
 | Streaming large files via `File.read!` | `File.stream!` + `Stream.*` | Request-change |
 
+**Patterns worth request-change even WITHOUT measurement:** some code shapes make the performance impact obvious from the diff alone — don't block on "have you measured this?" for these. Flag them as request-change with a brief why:
+
+- `Application.get_env` inside a tight loop or per-request hot path (read once at boot into `:persistent_term` / module attribute).
+- `<>` binary concatenation inside `Enum.reduce` / recursion (O(n²) — use IO lists).
+- `Enum.*` on a large known-to-be-large list where only early results are consumed (`Enum.take(..., k)` without `Stream.*`).
+- `Repo.get(...)` inside `Enum.map` on a caller-supplied list (classic N+1).
+- `Jason.decode!` of the same JSON string in a loop (decode once outside).
+
+For p95/p99 latency, memory-over-time, GC pressure — those still need measurement. But for algorithmic-shape issues visible in the diff, measurement is the author's responsibility at merge time, not the reviewer's gate.
+
 ### 7.10 Configuration review
 
 Full reference: `elixir-implementing` §8.6, `elixir-planning` §10.
@@ -460,6 +499,25 @@ Full reference: `elixir-implementing` §8.6, `elixir-planning` §10.
 | `runtime.exs` splits a comma-separated env var and `String.to_atom/1` on each element (`NODEPULSE_NODES="a@h1,b@h2"` → list of atoms) | Even for operator-controlled inputs this is unbounded atom creation on typos. Validate each element against a regex like `~r/^[a-z][\w]*@[\w\-.]+$/i` BEFORE converting, OR cap the list size, OR use `String.to_existing_atom/1` with a raise-on-unknown fallback. A CI pipeline accidentally generating a list of 10k node names can permanently exhaust the atom table | Block if from CI/untrusted; Request-change if strictly operator-controlled | implementing production-patterns §runtime.exs |
 | Hardcoded URLs / credentials / secrets | Move to config + env var | Block |
 | Test config imported into runtime code | Keep `config/test.exs` isolated; production should never import test config | Block |
+| `Application.get_env`/`fetch_env!`/`compile_env` scattered across many modules (> ~3 files outside the config accessor module) | Centralize in `MyApp.Config` — every module routes config reads through zero-arg accessors. In an umbrella, one Config module per deployable. Grep `Application.get_env\|fetch_env\|compile_env` lib/ should only hit the Config module | Request-change | implementing §10.5.1, planning §10.5 |
+| `==` comparison of a secret (API token, HMAC digest, verifier code, dev-path password) coming from an untrusted source | `Plug.Crypto.secure_compare/2` — `==` is variable-time and leaks byte-position via timing. For cleartext password verification specifically, use the password lib's verifier (`Bcrypt.verify_pass/2`) — it's already constant-time | Block | implementing §8.2.1 |
+
+### 7.11 Ecto migration review
+
+Migrations are a distinct artifact class. The bugs are bigger (production data loss, broken rolling deploys) and the lint stack is thinner (no `mix format` or `credo` rule catches most migration issues). Review with an explicit checklist:
+
+- [ ] **Reversible** — has an explicit `def up` / `def down`, or `def change` that Ecto can auto-reverse. Irreversible migrations (e.g. `execute("...")` with no down version) must include a comment explaining why.
+- [ ] **No schema module inside the migration** — migrations must NOT `alias MyApp.Schema`. Schema modules evolve over time; the migration's semantics must stay pinned. Use raw SQL or a migration-local schema.
+- [ ] **New foreign keys are indexed** — `add :thing_id, references(:things)` without a matching `create index(:table, [:thing_id])` is a deadlock waiting to happen (FK lookup table-scans).
+- [ ] **NOT NULL columns have defaults OR use two-step backfill** — adding `add :field, :string, null: false` to a populated table crashes the migration. Two-step pattern: (1) add nullable + backfill; (2) later migration adds `NOT NULL`.
+- [ ] **Wrapped queue-library migrations are pinned** — `Oban.Migration.up(version: 12)` (not `up()`) so future Oban versions don't silently add migrations when you re-run.
+- [ ] **Precision-sensitive columns match the schema** — `:utc_datetime_usec` column → schema declares `timestamps(type: :utc_datetime_usec)`. Mismatches cause round-trip bugs that are invisible until production.
+- [ ] **Concurrent index creation for large tables** — `create index(..., concurrently: true)`; ALTER TABLE locks long enough to stall writes otherwise. Requires `@disable_ddl_transaction true` + `@disable_migration_lock true`.
+- [ ] **`execute("...")` with user-like strings is parameterized safely** — migrations run in a privileged context; SQL injection via migration is rare but devastating. Prefer `execute(&up/0, &down/0)` with structured code over string interpolation.
+- [ ] **Data backfill goes through a separate script or Oban job for large tables** — in-migration `Repo.update_all(...)` on a 50M-row table will time out or lock production. Consider: migrate schema first, backfill in a follow-up job.
+- [ ] **Rolling-deploy compatible** — during deploy, old code runs against the new schema (and vice-versa). Columns can't be renamed in one step: (1) add new; (2) deploy code reading both; (3) backfill; (4) deploy code reading only new; (5) drop old.
+
+Block-severity: missing down, NOT NULL without backfill, schema module aliased in the migration, unindexed FK. Request-change: precision mismatch, un-pinned Oban migration. Suggest: adding `@moduledoc` explaining the non-obvious parts.
 
 ---
 
@@ -654,6 +712,55 @@ Symptom: Dialyzer flags contracts, missing callbacks, unreachable patterns, etc.
 6. **`:observer.start()`** — GUI system overview
 7. **`:recon.*`** — production-safe process inspection
 8. **`:recon_trace.calls/2` with message limit** — production tracing (ALWAYS set a limit)
+
+### 8.9 Event-subscription boot gap — the retro-scan pattern
+
+```
+Symptom: a GenServer that subscribes to events (node up/down, process :DOWN, PubSub topic,
+  Presence) shows empty state after start, misses peers/rows/members that were already there
+  before the subscription was installed.
+```
+
+`:net_kernel.monitor_nodes/1,2`, `Process.monitor/1`, `Phoenix.PubSub.subscribe/2`, and `Phoenix.Tracker` all deliver only **future** events. Anything that existed before you subscribed is invisible unless you explicitly replay it.
+
+**The fix is always the same shape:** subscribe first, then replay current state via `handle_continue/2` using the same handler as the live path.
+
+```elixir
+defmodule MyApp.ClusterWatcher do
+  use GenServer
+
+  def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  @impl true
+  def init(:ok) do
+    :ok = :net_kernel.monitor_nodes(true, node_type: :all)
+    # Subscribe first (so no window between retro-scan and live events),
+    # THEN deliver retro-events via handle_continue.
+    {:ok, %{peers: MapSet.new()}, {:continue, {:retro_nodeup, Node.list()}}}
+  end
+
+  @impl true
+  def handle_continue({:retro_nodeup, peers}, state) do
+    new_state = Enum.reduce(peers, state, &add_peer/2)
+    {:noreply, new_state}
+  end
+
+  @impl true
+  def handle_info({:nodeup, node, _info}, state), do: {:noreply, add_peer(node, state)}
+  def handle_info({:nodedown, node, _info}, state), do: {:noreply, remove_peer(node, state)}
+
+  defp add_peer(node, state), do: %{state | peers: MapSet.put(state.peers, node)}
+  defp remove_peer(node, state), do: %{state | peers: MapSet.delete(state.peers, node)}
+end
+```
+
+**Same shape applies to:**
+
+- `Process.monitor/1` against a DynamicSupervisor with existing children — on init, monitor each `DynamicSupervisor.which_children/1` result *after* setting up the monitor handler.
+- `Phoenix.Presence.list/1` when subscribing to a populated topic — replay the current list in `handle_continue`.
+- `Phoenix.PubSub.subscribe/2` for a topic where the "current state" is stored elsewhere (DB, ETS) — query it once in `handle_continue`.
+
+**Why `handle_continue/2` and not doing the scan inline in `init/1`:** keeping `init/1` fast lets the supervisor's start sequence progress; the continue fires immediately after, in the same process, before any external message can arrive.
 
 ---
 
@@ -1198,6 +1305,119 @@ Sometimes a PR introduces a pattern that's wrong, but fixing it properly would g
 - **Don't block** if it's a pre-existing stylistic issue the PR only touches.
 - **Request-change** with "let's file a follow-up issue" for anything in between.
 - **File the follow-up yourself** if you care about it happening. Don't leave it to the author.
+
+---
+
+## 12b. Harvesting Findings — The Review → Implementing Feedback Loop
+
+A review pass is not over when the findings are fixed. It's over when
+**novel findings are promoted into the implementing catalog** so the
+next author doesn't need the review to catch the same pattern.
+
+### The gap this closes
+
+Review findings tend to fall into two populations:
+
+1. **Idiosyncratic** — specific to this PR's logic, one-off mistake,
+   non-recurring. Leave in review comments; the diff gets the fix.
+2. **Patterned** — this is the third time a `rescue _ ->` slipped
+   through on a third-party API boundary, or the fourth time a
+   context function returned `{:error, "some string"}` instead of a
+   typed reason atom, or the fifth time a test used `Process.sleep/1`
+   for synchronization. These are *not* one-offs. They are tells that
+   the implementing skill is missing a BAD/GOOD pair, or the anti-slop
+   catalog is missing a regex, or `elixir-implementing §1` is missing
+   a rule.
+
+Without a promotion ritual, patterned findings stay in review output
+and fire again in the next review. The catalog doesn't grow from the
+evidence.
+
+### The ritual — post-review promotion
+
+After each review pass that produced >3 findings, walk the findings
+list with this question for each:
+
+> *If I saw this pattern in a different PR six months from now, would
+> I flag it again? And would it help if this skill / hook caught it
+> at write time instead of review time?*
+
+If the answer to both is yes, promote:
+
+| Finding shape | Where it goes |
+|---|---|
+| Simple regex catch (e.g., `Process.sleep` in a test, `rescue _ ->` catch-all, `String.to_atom/1` on user input) | **`anti-slop-patterns.json`** as a new check under the `elixir` language group. Severity `warn` unless the pattern is clearly a bug. Write a message that points at the real rule. |
+| Idiom violation with a one-line fix | **`elixir-implementing/SKILL.md §7` (anti-patterns Claude commonly produces)** as a new BAD/GOOD pair. Format: 5-10 line BAD block, 5-10 line GOOD block, 1-2 line rationale. |
+| Architectural / design-time concern | **`elixir-planning/SKILL.md §1` (as a new rule)** or into the relevant subskill (e.g., `process-topology.md` for a new GenServer-sizing pitfall). |
+| Proactive check that complements a reactive review rule | **`elixir-implementing §1` as a new numbered rule**, cross-referenced with the review-time counterpart. Example: the SSOT proactive rule (§1 #23) pairs with the review-time SSOT litmus (this skill's §1 or the `long-running-projects` SSOT-verification section). |
+
+### What NOT to promote
+
+- **Taste preferences.** "I'd name this `handle_message` not
+  `on_message`" is not a pattern.
+- **One-shot mistakes.** A typo, a misread changeset. Fixed in the
+  diff, stays there.
+- **Project-specific rules.** "In this codebase, `MyApp.Config` owns
+  all timeouts." That belongs in the project's `CLAUDE.md` or
+  `continue.md`, not in a global skill.
+- **Findings whose fix is still disputed.** If the PR author pushed
+  back and the team is still debating, don't codify. Let the
+  resolution settle first.
+- **Phoenix / Ash / LiveView framework-specific findings.** Those
+  belong in the framework skill (`phoenix-liveview`, `ash`, etc.),
+  not in the general `elixir-implementing` skill.
+
+### Litmus for "is this repeatable slop?"
+
+Before writing a new anti-slop pattern, check:
+
+1. Have I seen this pattern in more than one session/project? (If no
+   and you suspect it's a one-off, don't codify.)
+2. Is the pattern detectable by a reasonably simple regex, or does it
+   require semantic analysis? (Pure regex wins. Semantic analysis
+   means a more sophisticated hook, which is fine but adds cost.)
+3. Is there a clear idiomatic fix, not just "this is bad"? (Without a
+   fix, the pattern is a complaint, not a rule.)
+
+If all three are yes, write the catch. If any is no, leave it in the
+review output and wait for a second occurrence.
+
+### Worked example — `Process.sleep/1` in a test
+
+Three separate review passes caught variants of:
+
+```elixir
+test "eventually processed" do
+  send(pid, :go)
+  Process.sleep(100)
+  assert get_state() == :processed
+end
+```
+
+Each fix was the same: `assert_receive {:done, _}, 500` for a message-
+based signal, or `Task.await` / explicit synchronization if the work
+is task-based. Three occurrences → promotion criterion met. Result:
+new check `elixir-process-sleep-in-test` in
+`anti-slop-patterns.json` (severity `warn`, skip unless the file has
+`_test.exs` suffix), pointing at the existing §7 BAD/GOOD pair. The
+regex catches occurrences; the BAD/GOOD pair explains the why; the
+rule references the pair.
+
+This is the target shape: each layer reinforces the others.
+
+### When the catalog should shrink
+
+Patterns rot, too. A check that fires once per review but always gets
+a `RULE-EXCEPTION` marker is wrong — either the regex is too broad or
+the pattern isn't really slop. Remove checks that:
+
+- Fire only on false positives that nobody actually fixes.
+- Were added for a specific project that no longer reflects current
+  practice.
+- Have been superseded by a more precise check.
+
+A catalog that only grows eventually becomes ignored. Prune when a
+check stops paying for itself.
 
 ---
 

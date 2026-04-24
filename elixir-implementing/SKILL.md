@@ -36,7 +36,6 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 | [data-reference.md](data-reference.md) | Maps, structs, keywords, tuples, lists, MapSet, binaries, IO lists — complexity table + call patterns | Anything touching data-structure manipulation |
 | [otp-callbacks.md](otp-callbacks.md) | GenServer/Task/Agent/`:gen_statem` callback templates, supervisor child specs, Registry via-tuples, ETS calls, **GenStage/Broadway/Flow templates** | GenServer/Task/supervisor/streaming code |
 | [ecto-patterns.md](ecto-patterns.md) | Schemas, changesets, queries, migrations, Multi, custom types, schemaless changesets | Any Ecto code — schema or query |
-| [beam-databases.md](beam-databases.md) | Mnesia (tables, transactions, dirty ops, `:system` subscriptions, `extra_db_nodes` boot, `transform_table`) and Khepri (paths, transactional put/get, determinism rules, triggers, projections), supervision-tree ordering, anti-pattern quick reference | Any code that touches `:mnesia` or `:khepri` directly |
 | [testing-patterns.md](testing-patterns.md) | ExUnit, Mox, sandbox setup, factories, LiveView/Channel/Oban test helpers, property tests | Any test file |
 | [type-and-docs.md](type-and-docs.md) | `@spec`, `@type`, `@doc`, `@moduledoc`, doctests, Dialyzer config, built-in types, **`binary`/`String.t`/`iodata` decision**, **closed vs open map types**, **`dynamic()` gradual typing** | Adding types and documentation |
 | [networking-patterns.md](networking-patterns.md) | `:gen_tcp`/`:gen_udp` templates, acceptor loops, protocol framing (length-prefix, line, TLV), Ranch/Thousand Island handlers, TLS, HTTP clients | TCP/UDP/HTTP code |
@@ -57,6 +56,7 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 
 | § | Section | Mode |
 |---|---|---|
+| 0 | **The TDD Gate — Read Before Any Implementation** | **Gate ⛔** |
 | 1 | Rules for Writing Elixir | Rules |
 | 2 | Master "Which Construct?" Decision Guide | Decision ⭐ |
 | 3 | TDD Workflow | Rules + Decision |
@@ -71,11 +71,94 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 | 12 | Quick References — Stdlib Cheat Sheets | Lookup |
 | 13 | Related Skills | Navigation |
 
+**Scope — what this skill does NOT cover:**
+
+- Upfront architecture, supervision-tree shape, context boundaries, project layout → load `elixir-planning`.
+- Review of existing code, audits, profiling, debugging playbooks → load `elixir-reviewing`.
+- Deep LiveView/Phoenix, Ecto migrations beyond the essentials, Ash domain modeling → load the respective framework skill.
+- General runtime debugging, ops dashboards, performance tuning under load → out of scope; reach for `:observer`, BEAM flame graphs, and live production traces.
+
+---
+
+## 0. The TDD Gate — Read Before Any Implementation ⛔
+
+**Stop. This section fires at a higher abstraction level than §1 (Rules) or §2 (Decision tables).** Those fire when you're already mid-implementation. This one fires at the decision to *start* implementation, and it overrides anything below it. If you're at the keyboard about to type `def some_new_function`, you are in scope.
+
+### 0.1 The gate — four questions before any new production code
+
+For every new public function you are about to write:
+
+1. What is the function's name and module?
+2. What is the test file and test name that covers its happy path?
+3. Does that test exist on disk **right now**?
+4. When you ran the test suite **in the last few minutes**, did that specific test fail for the expected reason (missing function, wrong return shape — not a compilation error in your test)?
+
+If ANY answer is "no", "I'll write it after", or "I remember running it earlier", STOP. Go write the test, run `mix test path/to/test.exs`, confirm red. Then come back and implement.
+
+**No exceptions for the categories in §3.3 column A** (public API, business logic, refactors, changeset validations, `with` chains, context-boundary crossings). Those are the categories *most* likely to ship a bug without a test. They are NOT the exceptions to the gate — they are why the gate exists.
+
+### 0.2 Why this section exists (read once, remember always)
+
+A prior autonomous session built ~5.3k LoC across 12 milestones with elixir-implementing loaded before every milestone. Rule 1 said "ALWAYS write the test first." §3 described the RED-GREEN-REFACTOR loop. §3.3 listed the categories that require tests-first. **Tests-first was followed on zero milestones.** Four real bugs shipped into green commits and were only caught when tests were finally written in a review-fix pass:
+
+- `DETS :ordered_set` — doesn't exist (only in ETS). Sat for three milestones.
+- `Ecto.UUID.generate/0` through `insert_all` — 36-char binary encode error.
+- `NaiveDateTime` leaking from string-source Ecto queries.
+- LV stream rows not re-rendering on external assign changes — drove architectural rework.
+
+The rules existed. They did not fire at the right abstraction level. The gate above is the correction.
+
+### 0.3 Milestone-boundary checklist
+
+Before committing a milestone, feature, or any multi-module change:
+
+1. Name every new public function added this milestone.
+2. For each, name the test file and line covering the happy path.
+3. For each, name at least one test covering an error path.
+4. Is there a commit (or visible step in the diff) where the test file appeared **before** the implementation? If commits are squashed, the test file must be visible in the same diff as the implementation — but written first by the process.
+5. If any of the above answers is "no", DO NOT commit. Go write the tests, confirm they would have caught something if the implementation were wrong, then commit.
+
+If this checklist was not visible to you **before** you started writing the code, you are doing tests-after regardless of how you remember the sequence. Assume tests-after as the null hypothesis; require evidence to disprove it.
+
+### 0.4 Bug-fix retrospective — fires on every bug fix
+
+After any commit that fixes a bug:
+
+- Could this bug have been reproduced in a test **before** the fix? If no, why not?
+- Was there a test for the surrounding module at the time the bug shipped?
+- If not, the fix commit MUST include both (a) a test that would have caught the original bug and (b) tests for adjacent untested behavior in the same module.
+
+Shipping a bug fix without a regression test is not a fix — it is a statement that the bug class is acceptable. It will recur.
+
+### 0.5 Autonomous-mode warning
+
+In long autonomous or milestone-by-milestone sessions, there is constant pressure to "just ship this milestone" and come back to tests later. **Tests later is tests never.** TDD compounds across milestones: milestone N's tests catch milestone N+1's bugs. Skipping tests-first at milestone 2 to save twenty minutes costs you hours of debugging at milestone 5 — and the bugs shipped at milestone 5 are bugs you can no longer localize.
+
+Enforce the gate at milestone boundaries even when it slows individual commits. This skill-level rule overrides session-level velocity pressure. If you find yourself reasoning "the user is waiting, I'll batch the tests after M5", you are the failure mode this section is designed to prevent.
+
+### 0.6 Auditing TDD adherence from commit history
+
+Self-reports of "I did TDD" are unreliable. Audit from git:
+
+```bash
+# For each changed module, did its test file appear in the same commit or earlier?
+git log --format="%H %s" --name-status -- path/to/module.ex path/to/module_test.exs
+
+# If path/to/module_test.exs first appears in a commit LATER than
+# path/to/module.ex, TDD did not happen for that module.
+```
+
+Later test writing is a valuable defensive addition, but do NOT call it TDD and do NOT trust its coverage shape — tests-after tests tend to match the implementation rather than the intended behavior, so they pass even when the implementation is subtly wrong (see §3.8 BAD/GOOD).
+
+### 0.7 When tests-after IS allowed
+
+Tests-after is correct for a narrow set of categories, listed in §3.3 column B: UI/LiveView layout tweaks, HEEx template changes, performance optimizations (benchmark instead), pure visual CSS, one-off scripts, exploratory spikes. Everything else — *everything* — is tests-first.
+
 ---
 
 ## 1. Rules for Writing Elixir (LLM)
 
-1. **ALWAYS write the test first** — red → green → refactor. A feature without a test is incomplete. See §3.
+1. **ALWAYS pass the TDD gate (§0) before writing production code.** No new public function is written without its failing test already on disk and confirmed red. This rule has priority over every other rule in this list — if the gate wasn't passed, STOP reading §1, go back to §0, write the test. See §3 for the workflow, §3.9 for TDD-specific rules, §3.3 for the narrow set of tests-after cases.
 2. **ALWAYS reach for the decision table** (§2) when choosing between `if`, `case`, `cond`, `with`, and multi-clause functions. Structural dispatch = multi-clause; 2+ chained ok/error ops = `with`; boolean side-effect with no value = `if`; every common choice has a table row.
 3. **NEVER use `if`/`else` for structural dispatch.** Multi-clause functions with pattern matching handle shape/type branching. `if` is only for a simple boolean guard with no value-returning else branch.
 4. **NEVER use `try`/`rescue` for expected failures.** Return `{:ok, _}` / `{:error, _}` tuples and match them. Reserve `rescue` for genuine exceptional cases at system boundaries. For calling processes you don't own, prefer `catch :exit`.
@@ -89,7 +172,7 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 12. **ALWAYS use guard clauses** to constrain function heads rather than validating inside the body.
 13. **ALWAYS build strings with IO lists** (`[a, ", ", b]`) or interpolation (`"#{a}, #{b}"`), never by repeated `<>` concatenation in a loop (that's O(n²)).
 14. **ALWAYS use `@spec` on every public function** and `@doc` / `@moduledoc` describing purpose — use `@doc false` / `@moduledoc false` for intentionally undocumented internals.
-15. **ALWAYS put business logic in pure functions.** GenServer callbacks delegate to pure functions and only handle process mechanics.
+15. **ALWAYS put domain computation in pure functions.** OTP callbacks MAY orchestrate side-effects (starting children, writing ETS, emitting telemetry, scheduling timers) — that's their job. But the *computation* driving those effects — discount math, validation logic, state-transition rules, policy checks — lives in pure modules that the callback delegates to. "Pure function" applies to the decision logic, not to every line inside a callback. See §8.7 Instructions Pattern (elixir-planning) when side-effect orchestration grows complex enough to be first-class.
 16. **ALWAYS supervise long-running processes.** Never `spawn` / `spawn_link` for work that outlives its caller — use a Task.Supervisor, DynamicSupervisor, or permanent child under your app supervisor.
 17. **ALWAYS choose the narrowest OTP construct.** Preference order: pure function → struct module → Task → Agent → GenServer → gen_statem. Don't reach for GenServer when a pure function suffices. See §10.
 18. **ALWAYS go through context modules.** Controllers, LiveViews, CLI commands, GenServer callbacks, and scripts never call `Repo` directly — they call `Accounts.register_user/1`, `Catalog.get_product!/1`, etc.
@@ -97,6 +180,7 @@ This skill's SKILL.md carries the always-loaded decision tables, top anti-patter
 20. **ALWAYS use `%{struct | key: val}`** for struct updates, not `Map.put(struct, key, value)`. The update syntax raises on unknown keys, catching typos at compile time.
 21. **ALWAYS use the latest stable dependency versions** and follow the library's recommended `mix.exs` setup. Don't hand-craft configurations that would break the standard installation flow.
 22. **ALWAYS run `mix format`, `mix credo --strict`, and the test suite** before declaring a change done. Fix warnings; do not suppress them.
+23. **ALWAYS check the SSOT source before introducing a new magic literal.** Before you type `@timeout 5_000` in a module, or `%{role: "admin"}` in a changeset, or `Map.get(opts, :timeout, 30_000)` in a helper, grep the project for `config/config.exs` / `config/runtime.exs` / `lib/MY_APP/constants.ex` / any `MyApp.Config`-style module — if a name for this value already exists there, use it. If one doesn't but this value encodes a deliberate policy (timeout, retry count, role name, allowed set), add it THERE first and reference from here. Literals inline in business logic drift — the reviewing skill's SSOT litmus (*"if this fact changes, how many files do I have to update?"*) should answer 1, not N. Common Elixir SSOT homes: `config/*.exs` (for values that may change per environment), a dedicated `MyApp.Config` module (for values read on the hot path — see §10.5.1 `elixir-planning`), module `@attributes` (for values that are compile-time constants of a single module). The anti-slop `elixir-magic-literal-outside-config` check fires post-write as a backstop; this rule is the proactive version.
 
 ---
 
@@ -479,13 +563,15 @@ end
 
 ### 3.9 TDD rules (LLM)
 
-1. **ALWAYS run the test before implementing** — confirm red is red for the *right reason*.
+1. **ALWAYS pass the TDD gate (§0) before writing a new public function.** Run the test before implementing — confirm red is red for the *right reason*. This is Rule 1 of §1 restated; it fires at a higher abstraction level than any other TDD rule.
 2. **ALWAYS write the minimum** to go green. Write the next test before generalizing.
 3. **NEVER test private functions directly** — test via the public API. If the private is complex enough to test independently, it belongs in its own module.
 4. **NEVER assert implementation details** (which internal function was called, in what order). Assert observable behavior.
-5. **ALWAYS reproduce every bug as a failing test** before fixing. The test is the regression guard.
+5. **ALWAYS reproduce every bug as a failing test** before fixing. The test is the regression guard. See §0.4 bug-fix retrospective — shipping a fix without a regression test is not a fix.
 6. **PREFER many small `describe` blocks** over long flat test modules. Group by function-under-test.
 7. **PREFER `async: true`** on every test module that does not touch shared global state (named GenServers, global application env, `:global` registrations). Ecto sandbox is async-safe.
+8. **ALWAYS enforce test-first at milestone boundaries** in long or autonomous sessions (§0.5). Milestone velocity pressure biases toward tests-after; the TDD gate overrides that pressure. TDD compounds across milestones — one milestone's tests catch the next milestone's bugs.
+9. **NEVER trust self-reports of TDD adherence** — audit from git (§0.6). If the test file appears in a commit after the implementation file, TDD did not happen for that module regardless of current coverage. Later tests tend to match the implementation rather than the intended behavior.
 
 ---
 
@@ -1340,6 +1426,48 @@ Map.put(user, :nmae, "Jane")  # No error! Silently adds :nmae to the struct
 %{user | name: "Jane"}
 ```
 
+### 5.9 LiveView streams do NOT react to external assign changes
+
+A stream row's DOM is only re-rendered when you call `stream_insert/3,4` with that row. Updating a *separate* assign — even one the row template reads — will NOT redraw existing stream rows. This is a core performance optimization of streams: they don't re-render everything on every assign change. It is also the most common LiveView trap.
+
+```elixir
+# BAD — device_states is a separate assign; changing it does NOT re-render stream rows
+def mount(_, _, socket) do
+  socket =
+    socket
+    |> stream(:devices, Fleet.list_devices())
+    |> assign(:device_states, %{})
+  {:ok, socket}
+end
+
+def handle_info({:device_state_changed, id, new_state}, socket) do
+  # Stream rows still show the OLD state — the row DOM isn't re-emitted
+  {:noreply, update(socket, :device_states, &Map.put(&1, id, new_state))}
+end
+```
+
+```elixir
+# GOOD — the state lives ON the stream member, and we re-insert on change
+def mount(_, _, socket) do
+  {:ok, stream(socket, :devices, Fleet.list_with_state())}
+  # list_with_state/0 returns %Device{current_state: ...} with virtual field populated
+end
+
+def handle_info({:device_state_changed, id, new_state}, socket) do
+  device = Fleet.get_device_with_state!(id)
+  # stream_insert updates the row in-place — this triggers re-render
+  {:noreply, stream_insert(socket, :devices, device)}
+end
+```
+
+**When state is computed outside the stream** (e.g., cluster-wide presence, a cross-context derivation), either:
+1. Attach it to the stream member via a virtual schema field populated by the context query (`Ecto.Schema` `field :current_state, :map, virtual: true`), or
+2. Wrap the row payload in a plain map (`%{device: device, state: state}`) and use that as the stream member.
+
+Then make every `handle_info` that can change the row's appearance call `stream_insert/3,4` with the updated member. `assign`-only updates to unrelated keys will not redraw the row.
+
+This is one of the highest-impact LV gotchas — it often drives architectural rework (virtual field on the schema, `list_with_state/1` context function with `DISTINCT ON`, etc.). Design for it at planning time; don't discover it in a test failure.
+
 ---
 
 ## 6. Idiomatic Elixir Constructs
@@ -1951,6 +2079,22 @@ end
 | Programmer error in script / seed | Use bang variant, let it crash |
 | Anything else inside a supervised process | Let it crash — supervisor restarts |
 
+#### 8.2.1 Secret comparison — constant-time only
+
+When comparing secrets (API tokens, HMAC digests, verifier codes, literal passwords in dev/debug paths) use `Plug.Crypto.secure_compare/2`. The regular `==` operator is variable-time: it short-circuits on the first mismatched byte, leaking timing information that can be exploited remotely.
+
+```elixir
+# BAD — variable-time comparison of a secret
+def valid_api_key?(user_input), do: user_input == @expected_api_key
+
+# GOOD — constant-time, even when lengths differ
+def valid_api_key?(user_input) do
+  Plug.Crypto.secure_compare(user_input, @expected_api_key)
+end
+```
+
+Rule of thumb: if the value being compared came from an untrusted source and a "match" grants access, use `secure_compare/2`. Cookies, bearer tokens, HMAC digests, webhook signatures all qualify. For cleartext password verification specifically, use your password library's verifier (`Bcrypt.verify_pass/2`, `Argon2.verify_pass/2`) — those are already constant-time.
+
 ### 8.3 Module structure — the canonical template
 
 ```elixir
@@ -2208,6 +2352,71 @@ When implementing code that involves processes, the first decision is always *do
 | Name-based dispatch across many processes | Registry (`:via` tuples) | Per-process naming without atoms |
 | Many transient processes (one per user/session) | DynamicSupervisor + Registry | Start/stop dynamically, find by key |
 | Pub/sub within a node | `Registry` with `:duplicate` keys, or `Phoenix.PubSub` | Native dispatch |
+
+#### 9.2.1 `:gen_statem` callback mode — default to `[:state_functions, :state_enter]`
+
+`:gen_statem` has three callback modes. The default choice for per-entity FSMs (device state, order workflow, connection lifecycle) is `[:state_functions, :state_enter]`:
+
+| Callback mode | When to use | Shape |
+|---|---|---|
+| `[:state_functions, :state_enter]` | **Default for per-entity FSMs.** One function per state; `:enter` callbacks for transition-local effects (start timer, log transition, push telemetry). | `def idle(:enter, _old, data), do: ...` + `def idle({:call, from}, msg, data), do: ...` |
+| `:state_functions` (without state_enter) | Simple FSMs where transitions have no setup/teardown. Rare. | Same as above, no `:enter` clause. |
+| `:handle_event_function` | One big `handle_event/4` dispatching on state. Use when states are not well-separated (many shared events) or the state space is dynamic. | `def handle_event({:call, from}, msg, state, data), do: ...` |
+
+```elixir
+defmodule MyApp.Device do
+  @behaviour :gen_statem
+  def callback_mode, do: [:state_functions, :state_enter]
+
+  def init(opts), do: {:ok, :offline, %{id: opts[:id], last_seen: nil}}
+
+  # One function per state
+  def offline(:enter, _old, _data), do: :keep_state_and_data
+  def offline({:call, from}, :ping, data) do
+    {:next_state, :online, %{data | last_seen: now()}, [{:reply, from, :ok}]}
+  end
+
+  def online(:enter, _old_state, data) do
+    Logger.info("device online", id: data.id)
+    {:keep_state_and_data, [{:state_timeout, 30_000, :expire}]}
+  end
+  def online(:state_timeout, :expire, data), do: {:next_state, :offline, data}
+  def online({:call, from}, :ping, data), do: {:keep_state, %{data | last_seen: now()}, [{:reply, from, :ok}]}
+end
+```
+
+The `:state_enter` half is what makes this mode idiomatic: transition-side-effects live in the `(:enter, _old_state, data)` clause of the destination state, not scattered across the transitioning events.
+
+#### 9.2.2 `:persistent_term` hot-path config with test-override
+
+Pattern: a value read on every call must be O(1), configured once at boot, and swappable in tests. The shape:
+
+```elixir
+defmodule MyApp.Signal do
+  @moduledoc "Backend-swappable signal codec. Hot path reads go through backend/0."
+
+  # Called once from Application.start/2 — AFTER the supervision tree is up.
+  @spec install_backend() :: :ok
+  def install_backend do
+    backend = Application.fetch_env!(:my_app, __MODULE__)[:backend]
+    :persistent_term.put({__MODULE__, :backend}, backend)
+  end
+
+  # Hot path — O(1), no GenServer, no Application dict lookup.
+  @spec backend() :: module()
+  def backend, do: :persistent_term.get({__MODULE__, :backend})
+
+  # Test helper — writes to BOTH Application env and persistent_term so
+  # tests can swap the backend. Use in setup blocks or per-test fixtures.
+  @spec put_backend(module()) :: :ok
+  def put_backend(mod) when is_atom(mod) do
+    Application.put_env(:my_app, __MODULE__, backend: mod)
+    :persistent_term.put({__MODULE__, :backend}, mod)
+  end
+end
+```
+
+Use this for: codec/backend choice, NIF-vs-pure fallback, feature-flag modules, hot-path formatters. NOT for: values that change per-call (use Application env or GenServer state); large values (persistent_term writes are expensive — O(n) copy across all processes).
 
 ### 9.3 GenServer — canonical template
 
@@ -2752,6 +2961,41 @@ def port, do: Application.get_env(:my_app, :port, 4040)
 
 **Diagnostic:** before switching `get_env` to `compile_env`, grep for the key in `config/runtime.exs` AND in every test file. If either overrides it at runtime, leave `get_env` in place and document the choice in a moduledoc line — future reviewers will ask, and the answer should be findable.
 
+#### 10.5.1 Centralize config reads in a `MyApp.Config` module
+
+Scattered `Application.get_env/3` calls across dozens of modules are an anti-pattern: they hide what's configurable, they're hard to mock consistently, and they're hard to audit. Instead, every application should have a single `MyApp.Config` module whose public functions are zero-arg accessors. Every other module routes config reads through that module.
+
+```elixir
+defmodule MyApp.Config do
+  @moduledoc """
+  All application configuration accessors. Every `Application.get_env` /
+  `compile_env` read for this app lives here and nowhere else.
+
+  Benefits: `grep 'Application.get_env' lib/` should return zero hits outside
+  this file. Tests swap values by `Application.put_env/3` in setup blocks and
+  the accessors reflect the swap.
+  """
+
+  @spec database_url() :: String.t()
+  def database_url, do: Application.fetch_env!(:my_app, MyApp.Repo)[:url]
+
+  @spec signal_backend() :: module()
+  def signal_backend, do: Application.fetch_env!(:my_app, MyApp.Signal)[:backend]
+
+  @spec api_timeout_ms() :: pos_integer()
+  def api_timeout_ms, do: Application.get_env(:my_app, :api_timeout_ms, 5_000)
+
+  # Truly compile-time (no runtime.exs override, no test swap):
+  @feature_flags Application.compile_env(:my_app, :feature_flags, [])
+  @spec feature_flags() :: keyword()
+  def feature_flags, do: @feature_flags
+end
+```
+
+**In an umbrella,** each deployable app gets its own `MyApp.Config` (e.g., `Nodepulse.Config` for the central app, `NodepulseEdge.Config` for the edge app). Shared wire/protocol libs use the default Application env pattern so consumers configure them.
+
+**Audit boundary discipline** with: `grep -rn 'Application.get_env\|Application.fetch_env\|Application.compile_env' lib/` — any hits outside the Config module are either (a) something that belongs in Config, or (b) deliberately local with a moduledoc explanation. Treat both as code-review checkpoints.
+
 ### 10.6 Ecto — the implementation boundary
 
 **Never call `Repo` from a boundary layer (controller, LiveView, CLI). Always go through a context.**
@@ -2795,6 +3039,44 @@ defmodule MyApp.Catalog do
   defp maybe_filter_by_stock(q, in_stock?), do: where(q, [p], p.in_stock == ^in_stock?)
 end
 ```
+
+#### 10.6.1 `Repo.insert_all` bypasses casts — pass raw DB representations
+
+`Repo.insert_all/3` is schemaless by design: it does NOT run changeset validations, Ecto type casts, or `autogenerate` hooks. Rows are passed straight to the adapter. If a column needs a type round-trip, you pass the dumped form yourself:
+
+| Column type | WRONG (string/atom) | RIGHT (raw representation) |
+|---|---|---|
+| `binary_id` / `Ecto.UUID` | `Ecto.UUID.generate/0` (36-char hex string) | `Ecto.UUID.bingenerate/0` (16-byte binary) |
+| `Ecto.Enum` with atom values | `:active` | `"active"` (string) — or `Atom.to_string/1` |
+| `:utc_datetime_usec` | `DateTime.utc_now/0` (mostly works) | `DateTime.utc_now/0 \|> DateTime.truncate(:microsecond)` |
+| Custom `Ecto.Type` | any high-level value | `MyType.dump!(value)` (call `dump/1` manually) |
+
+```elixir
+# BAD — Postgrex raises "expected a binary of 16 bytes"
+Repo.insert_all("rollups", [%{id: Ecto.UUID.generate(), bucket: ~U[2026-01-01 00:00:00Z]}])
+
+# GOOD — binary UUID passed raw
+Repo.insert_all("rollups", [%{id: Ecto.UUID.bingenerate(), bucket: ~U[2026-01-01 00:00:00Z]}])
+```
+
+This is a real recurring bug class. When in doubt with `insert_all`, prefer `Repo.insert_all(Schema, rows)` (with the schema module) — Ecto will then dump known fields through schema types. The bare-string table form `Repo.insert_all("table_name", rows)` assumes rows are already in DB form.
+
+#### 10.6.2 `NaiveDateTime` leaks from string-source queries
+
+Querying via a string source (`from(b in "rollups_1m", ...)` without a schema) returns `NaiveDateTime` for `:utc_datetime*` columns, regardless of how the column is stored. Ecto has no schema metadata to lift the value to `DateTime` — so downstream code that expects `DateTime.t()` will break.
+
+```elixir
+# BAD — assumes DateTime comes out, crashes on DateTime.diff/3
+from(b in "rollups_1m", where: b.bucket > ^cutoff, select: b.bucket)
+|> Repo.all()
+# Returns [%NaiveDateTime{}, ...], not [%DateTime{}, ...]
+
+# GOOD — normalize at the context boundary
+defp normalize_bucket(%NaiveDateTime{} = n), do: DateTime.from_naive!(n, "Etc/UTC")
+defp normalize_bucket(%DateTime{} = d), do: d
+```
+
+Prefer schema-bound queries whenever possible; reach for string sources only for reports, dynamic multi-tenant tables, or perf-critical bulk paths — and always wrap datetime fields through a `normalize_*` helper at the context boundary.
 
 ### 10.7 Struct vs map — decision table
 
