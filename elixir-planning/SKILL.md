@@ -47,6 +47,7 @@ This SKILL.md covers the decision tables and quick-reference material. For depth
 
 ## How to use this skill
 
+0. **Resuming a long-running project (M-prefix commits, `continue.md`, multi-session work)?** — **Load `long-running-projects.md` first.** It's the meta-workflow for everything below: which document records what (PLAN.md vs continue.md vs commit messages), milestone-boundary checklist (incl. Ecto-specific invariants), SSOT invariant verification, cross-session handoff quality. If the project has 5+ commits with `M\d+:` prefixes, this subskill is the primary reference; the rest of this SKILL.md becomes lookup material for specific design questions within a milestone.
 1. **Starting a new project?** — Read §0 (Plan-Completeness Gate) first, then §1 (Rules), §2 (Planning Workflow), §5 (Project Layout). Walk through the decisions in sequence.
 2. **Adding a new feature to an existing project?** — §0 (Plan-Completeness Gate), §2 (Planning Workflow), §3 (Master Decision Table). Check §6 (do I need a new context?) and §8 (do I need a new process?).
 3. **Refactoring?** — §13 (Growing Architecture) to identify where you are, §14 (Anti-patterns) to find what to fix, §6 and §9 for context/integration rework.
