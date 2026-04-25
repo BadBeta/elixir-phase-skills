@@ -152,7 +152,7 @@ Later test writing is a valuable defensive addition, but do NOT call it TDD and 
 
 ### 0.7 When tests-after IS allowed
 
-Tests-after is correct for a narrow set of categories, listed in §3.3 column B: UI/LiveView layout tweaks, HEEx template changes, performance optimizations (benchmark instead), pure visual CSS, one-off scripts, exploratory spikes. Everything else — *everything* — is tests-first.
+Tests-after is correct for a **very narrow** set: HEEx/EEx templates, CSS/styling, and one-off scripts outside `lib/`/`src/`. That's it. A `def` in `lib/` is production code — "glue code", "thin wrapper", and "it's just forwarding" are NOT valid exemptions. The review that catches bugs in untested code costs 10x more than the test that prevents them. Performance optimizations are tested via benchmarks (Benchee), not ExUnit — but the benchmark must exist.
 
 ---
 
@@ -3237,4 +3237,29 @@ For the full stdlib reference (every function with parameters and examples), loa
 
 ---
 
-**End of SKILL.md.** This skill is optimized for the moment of writing Elixir — decision tables first, templates second, rules and BAD/GOOD as validators. For upfront design, load `elixir-planning` (when available) alongside this skill. For review, load `elixir-reviewing` (when available).
+## 14. Before You Commit — 60-Second Self-Review
+
+Run this checklist mentally before every commit. It catches the top recurring issues that `elixir-reviewing` finds — at write time instead of review time. No need to load the reviewing skill for these.
+
+### Code scan (grep your diff)
+
+1. **`rescue` without `__STACKTRACE__`?** — Use `Exception.format(:error, e, __STACKTRACE__)`, never `Exception.message(e)` alone. Stacktrace-less rescues make debugging 10x harder.
+2. **`File.read!` in `lib/`?** — Use `File.read/1` with `{:ok, content} -> ...` / `{:error, _} -> ...`. Reserve `!` for scripts, seeds, and test fixtures.
+3. **Pattern match assuming 3-tuple?** — `fn {_, meta, _} -> ...` without a fallback clause. AST nodes, keyword pairs, and bare values may not be 3-tuples. Add `fn {_, meta, _} -> ...; _ -> ... end`.
+4. **Overbroad predicate?** — Matching any variable name containing "token" or "password" will false-positive on `token_count`, `password_policy`. Narrow to the specific call site (`inspect(credentials)`), not the variable name.
+5. **Public function without `@spec`?** — Every `def` in a public module needs `@spec`. `@doc false` internals are exempt.
+
+### Architecture check (3 questions from elixir-planning)
+
+6. **Does this new module cross a context boundary?** — If `Archdo.Mcp.Tools.Stats` calls `Archdo.Compiled.analyze/1` directly, that's a boundary crossing. Should it go through the `Archdo.Compiled` facade?
+7. **Does this new process need supervision?** — Any `spawn`, `Task.async` without a supervisor, or `GenServer.start` without being a child somewhere.
+8. **Is this the simplest inter-context mechanism?** — Direct function call before PubSub before GenStage before Oban before event sourcing. Don't escalate without a triggering problem.
+
+### Test check
+
+9. **Does every new `def` in `lib/` have a test?** — Name the test file and the test function. If you can't, write the test now.
+10. **Does the test assert behavior, not implementation?** — `assert {:ok, %User{}} = register(attrs)` not `assert Repo.insert was called`.
+
+---
+
+**End of SKILL.md.** This skill is optimized for the moment of writing Elixir — decision tables first, templates second, rules and BAD/GOOD as validators. For upfront design, load `elixir-planning` alongside this skill. For review, load `elixir-reviewing`.

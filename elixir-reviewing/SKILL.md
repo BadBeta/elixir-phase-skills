@@ -1451,4 +1451,25 @@ When reviewing code from these domains, load the specialized skill alongside thi
 
 ---
 
+## 14. Post-Review: Run the Harvest Loop
+
+After every review pass that produced 3+ findings, **explicitly run the §12b promotion ritual** before closing:
+
+1. Walk each finding and ask: *"If I saw this in a different PR six months from now, would I flag it again?"*
+2. For each "yes": decide where it goes:
+
+| Finding shape | Promote to |
+|---|---|
+| Simple regex catch | `~/.claude/hooks/anti-slop-patterns.json` as a new `elixir` check |
+| Idiom violation with one-line fix | `elixir-implementing` §7 as a new BAD/GOOD pair |
+| Architectural concern | `elixir-planning` §1 as a new rule |
+
+3. **Do the promotion now, not later.** A finding left in review output fires again in the next review. A finding promoted to a hook or skill catches it at write time.
+4. **Verify the anti-slop JSON is valid** after editing: `python3 -c "import json; json.load(open('$HOME/.claude/hooks/anti-slop-patterns.json'))"`
+5. **State what was promoted** in your review summary so the user sees the feedback loop closing.
+
+**This step is not optional.** Skipping it means the review catalog doesn't grow from evidence, and the same patterns recur session after session.
+
+---
+
 **End of SKILL.md.** This skill inspects code that already exists — in review, in debug, or in profile mode. For writing new code idiomatically, load `elixir-implementing`. For designing new systems, load `elixir-planning`. The three skills together cover plan → implement → review as a complete development cycle.
