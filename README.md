@@ -1,28 +1,28 @@
 # elixir-phase-skills
 
-Replacement for the previous monolithic `elixir` skill. Layers on top of [BB-skill-core](https://github.com/BadBeta/BB-skill-core).
+Replacement for the previous monolithic `elixir` skill. In addition it needs [BB-skill-core](https://github.com/BadBeta/BB-skill-core) which install hooks common to all languages.
 
-## Skills optimized for different development phases
+## Optimized for different development phases
 
-Software work happens in distinct phases — planning architecture, implementing the design, reviewing what was built — and each phase wants a different *kind* of guidance. Planning is dominated by architectural decision tables and structural trade-offs (contexts, supervision shape, OTP boundaries). Implementing wants idiomatic templates, BAD/GOOD pairs, and "which construct?" tables that fire at the moment of writing (`with` vs `case` vs `cond`, `GenServer` vs `Task` vs `Agent`). Reviewing wants severity-classified checklists, debugging playbooks (recon, observer, sys.trace), and refactor templates.
+Software work with Claude have phases of planning, implementing the plan, and then reviewing what was done. For each phase Claude is best served with a different *kind* of guidance. 
 
-When that all lives in a single skill, the LLM loads ~3000 mixed lines and applies whatever fragment surfaces — planning advice trips during implementation, review heuristics misfire on greenfield code, and the truly relevant section drowns in the rest. Phase-targeted skills make the right form of guidance fire at the right moment:
+Planning by architectural decision tables and structural trade-offs (contexts, supervision shape, OTP boundaries). Implementing wants guidance that fires at the moment of writing like idiomatic templates, BAD/GOOD pairs, and "which construct?" tables. For reviewing severity-classified checklists, debugging playbooks and refactor templates work best.
 
-| Skill | Loaded when | Primary content |
-|---|---|---|
-| `elixir-planning` | Architecture, contexts, supervision tree, deployment | Numbered planning rules, OTP design tables, context-boundary patterns |
-| `elixir-implementing` | At-the-keyboard coding | Pattern matching, `with` chains, OTP callback templates, BAD/GOOD pairs, TDD with ExUnit |
-| `elixir-reviewing` | After-the-fact inspection | Severity-classified checklists, debugging + profiling playbooks, refactor templates |
+With everything in a fat single major skill as before the LLM loads ~3000 mixed lines and segment will misfire: Planning advice trips during implementation, review heuristics on greenfield code, and the parts best focused on the current phase drowns between the others. Phase-targeted skills aim to give the right guidance at the right moment.
 
-The phases overlap intentionally — implementing references planning for "why this shape," reviewing references implementing for "what should I see here" — but each is optimized for one moment in the work. `phoenix` and `phoenix-liveview` ship alongside since they're inseparable from idiomatic Elixir web work.
+The phases intentionally overlap somewhat. Implementing references planning for "why this shape," reviewing references implementing for "what should I see here", and especially important parts can be repeated across two or all. 
+
+The phoenix and phoenix-liveview skills were put in with the elixir skills but are not upgraded to phased. That will come later.
 
 ## Hooks
 
-Skills loaded ≠ skills applied. Putting knowledge into context doesn't ensure the LLM walks the decision tables, reads the BAD/GOOD pairs, or recalls the rules at the right edit site.
+Getting the right skills invoked before Claude needs them can be a challenge. And having the skills invoked is not the same as the skills being actively used and applied. Claude is both lazy and arrogant.
 
-The `BB-skill-core` hook stack closes that gap. The skill-enforcement hook (PreToolUse) blocks mutating tools — Edit, Write, mutating Bash — until a relevant Skill has been invoked in the recent window. Orientation operations (`ls`, `pwd`, `git status/log/diff`, file reads) are exempt; the gate only fires when the LLM is about to *change* something. The `[use-skills]` marker activates this enforcement for a session; `[no-skills]` opts out.
+The `BB-skill-core` hook stack closes that gap. The skill-enforcement hook (PreToolUse) blocks mutating tools like edit, write and mutating Bash until a relevant Skill has been invoked. The `[use-skills]` marker activates this enforcement for a session; `[no-skills]` opts out. It also activates some other hooks to help active use of the skills.
 
-Combined with the anti-slop scanner (PostToolUse) and the post-generator scanner (one-shot after `mix phx.new` / `mix igniter.new`), the stack catches what the skills warn about even when the LLM didn't re-attend to the relevant section — at the exact moment the file was written. The Phoenix `runtime.exs` port-bug, `unless ... else` shapes, `Process.sleep` in tests, `String.to_atom` on user input — all caught mechanically as code-level enforcement of skill knowledge. Skills become checkpoints, not just context.
+For important code decisions Claude it told to place a §§ marker in comment and cite any relevant decisions table or guidance in the skill for it's decisions. This is to promote active use of skills, and the comments can easily be scripted away later.
+
+Another hook runs an anti-slop scanner that aims to catch some easy to detect issues that the skills warn about even if Claude ignored the skill. It fires before the offending slop is written to file, and thus while a better implementation can still be made with all context available. 
 
 ## TDD
 
@@ -34,15 +34,13 @@ Combined with the anti-slop scanner (PostToolUse) and the post-generator scanner
 - The function's name exists in `git log -S` history (rename, move, module split)
 - The file is a Rustler NIF loader stub (`use Rustler` + `:erlang.nif_error/1`)
 
-The exemptions matter: TDD enforcement fires only on genuinely new behavior. Refactors are silent. When the gate does fire, the message is the full reminder every time — no fade — because the cost of a missed reminder is high and the cost of a noticed one is small. Use `[no-TDD]` to cancel mid-session.
+The exemptions aim to make TDD enforcement only fire on genuinely new behavior. Refactors should be silent. When the gate does fire, the message is the full annoying reminder every time on purpose. Because the cost of a missed reminder is high and the cost of a noticed one is small. Use `[no-TDD]` to cancel mid-session.
 
 ## Plans
 
-For long-running, milestone-structured projects (a `PLAN.md` with `M1:` / `M2:` / `M3:` … markers), `bb-milestone-skill-report.py` (PreToolUse) blocks edits to project files until `milestone_skill_report.md` has an entry for the active milestone listing which skill sections were considered before starting it.
+For long-running, milestone-structured projects (ask for a milestone plan during planning) the hooks will force writing a skeleton milestone_skill_report.md with which skill sections were considered before starting the next step. 
 
-This is the strongest skill-engagement mechanism in the stack — not a passive reminder, not an "always cite" suggestion, but a hard gate on the next file edit. The LLM cannot start implementing M3 without first writing, visibly and verifiably, which skill sections were *relevant* to that milestone — not "all loaded skills," just the ones that apply. If a relevant skill hasn't been loaded yet, it gets loaded. If a loaded skill doesn't apply to this milestone, it gets omitted (a milestone about background-job retry semantics shouldn't drag in `phoenix-liveview` for the sake of completeness). The plan and the relevant skill fragments are pulled into a single scan-able artifact that proves "the right knowledge was on the table when the work began."
-
-`bb-milestone-commit-check.py` complements this by gating `M\d+:`-prefixed commits — the milestone must be marked DONE in `PLAN.md` before its commit is allowed.
+This is not about reporting file as such. It is that writing this forces Claude to focus, work and use the relevant skills section before implementing. This is the strongest skill-engagement mechanism in the stack for long projects. 
 
 ## Install
 
@@ -68,15 +66,20 @@ Removes only the Elixir-pack files. `BB-skill-core` and other language packs are
 
 ## Coexistence
 
-Both `rust-phase-skills` and `elixir-phase-skills` can be installed side-by-side. They drop their own per-language fragments into `~/.claude/hooks/bb-anti-slop-patterns.d/`, `bb-skill-triggers.d/`, and `bb-post-generator-patterns.d/`, which the core hooks merge at runtime.
+The installs are namespaced 'bb' and purely additive, and should not affect any existing hooks or other installs. Likewise adding more languages will not affect the already installed ones. 
 
 ## Pack contents
 
 - `elixir-planning/`, `elixir-implementing/`, `elixir-reviewing/` — the three phase skills
 - `phoenix/`, `phoenix-liveview/` — the framework skills (bundled because they're inseparable from idiomatic Elixir web work)
 - `hooks/bb-rationale-marker-elixir.py` — flags `# §§` rationale markers left in committed code
-- `hooks/bb-anti-slop-patterns.d/elixir.json` — 18 Elixir anti-slop patterns (try/rescue for ok/error, `Process.sleep` in tests, `String.to_atom` on user input, the three `else`-shape smells, etc.)
-- `hooks/bb-skill-triggers.d/elixir.json` — 99 keyword → skill mappings, all targeting the five bundled skills (`elixir-planning`, `elixir-implementing`, `elixir-reviewing`, `phoenix`, `phoenix-liveview`). Triggers are deliberately scoped to what this pack actually ships — keywords that previously pointed to non-bundled skills (OTP, Ash, Nerves, Membrane, Livebook, etc.) have been removed so installs don't suggest skills the user doesn't have.
+- `hooks/bb-anti-slop-patterns.d/elixir.json` — 18 Elixir anti-slop patterns
+- `hooks/bb-skill-triggers.d/elixir.json` — keyword → skill mappings for Elixir and Phoenix 
 - `hooks/bb-post-generator-patterns.d/elixir.json` — checks for `mix phx.new` / `mix igniter.new` output (Phoenix `runtime.exs` port + secret_key_base guards)
 
 Extensions covered: `.ex`, `.exs`, `.heex`, `.leex`.
+
+Claude has summarized a more detailed user guide which should be up to datish.
+
+
+
