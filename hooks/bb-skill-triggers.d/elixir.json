@@ -7,7 +7,6 @@
       "elixir-implementing"
     ],
     ":erpc": [
-      "erpc",
       "elixir-implementing"
     ],
     "anti-pattern": [
@@ -20,7 +19,6 @@
       "elixir-planning"
     ],
     "ash": [
-      "ash",
       "elixir-implementing"
     ],
     "assign_async": [
@@ -28,7 +26,6 @@
       "phoenix"
     ],
     "audio pipeline": [
-      "membrane",
       "elixir-implementing",
       "phoenix-liveview"
     ],
@@ -36,7 +33,6 @@
       "elixir-reviewing"
     ],
     "beam dist": [
-      "erpc",
       "elixir-implementing",
       "elixir-planning"
     ],
@@ -61,12 +57,10 @@
       "elixir-reviewing"
     ],
     "commanded": [
-      "event-sourcing",
       "elixir-implementing",
       "elixir-planning"
     ],
     "cqrs": [
-      "event-sourcing",
       "elixir-implementing",
       "elixir-planning"
     ],
@@ -87,19 +81,12 @@
       "elixir-planning"
     ],
     "distributed elixir": [
-      "erpc",
       "elixir-implementing",
       "elixir-planning"
-    ],
-    "docx": [
-      "ecma-376"
     ],
     "dynamic supervisor": [
       "elixir-implementing",
       "elixir-planning"
-    ],
-    "ecma-376": [
-      "ecma-376"
     ],
     "ecto": [
       "phoenix",
@@ -113,18 +100,13 @@
     "elixir": [
       "elixir-implementing"
     ],
-    "elixir deployment": [
-      "elixir-deployment"
-    ],
     "elixir desktop": [
-      "elixir-desktop",
       "elixir-implementing"
     ],
     "erlang": [
       "elixir-implementing"
     ],
     "erpc": [
-      "erpc",
       "elixir-implementing"
     ],
     "ets": [
@@ -132,7 +114,6 @@
       "elixir-planning"
     ],
     "event sourcing": [
-      "event-sourcing",
       "elixir-implementing",
       "elixir-planning"
     ],
@@ -141,8 +122,6 @@
       "elixir-planning"
     ],
     "featherwing": [
-      "elixir-featherwings",
-      "nerves",
       "elixir-implementing"
     ],
     "flow": [
@@ -151,8 +130,7 @@
     ],
     "fsm": [
       "elixir-implementing",
-      "elixir-planning",
-      "state-machine"
+      "elixir-planning"
     ],
     "gen_server": [
       "elixir-implementing",
@@ -164,13 +142,11 @@
     ],
     "gen_state_machine": [
       "elixir-implementing",
-      "elixir-planning",
-      "state-machine"
+      "elixir-planning"
     ],
     "gen_statem": [
       "elixir-implementing",
-      "elixir-planning",
-      "state-machine"
+      "elixir-planning"
     ],
     "genserver": [
       "elixir-implementing",
@@ -179,11 +155,6 @@
     "genstage": [
       "elixir-implementing",
       "elixir-planning"
-    ],
-    "hailo": [
-      "nerves",
-      "rpi5-hailo",
-      "buildroot"
     ],
     "heex": [
       "phoenix-liveview",
@@ -195,37 +166,28 @@
     "hex.pm": [
       "elixir-implementing"
     ],
-    "hmi": [
-      "live-industrial-web-ui"
-    ],
     "horde": [
-      "erpc",
       "elixir-implementing"
     ],
     "iex": [
       "elixir-implementing"
     ],
     "igniter": [
-      "igniter",
       "elixir-implementing"
     ],
     "implement": [
       "elixir-implementing"
     ],
     "industrial ui": [
-      "live-industrial-web-ui",
       "phoenix-liveview",
       "phoenix"
     ],
     "industrial web": [
-      "live-industrial-web-ui",
       "phoenix-liveview",
       "phoenix"
     ],
     "kino": [
-      "livebook",
-      "elixir-implementing",
-      "svg"
+      "elixir-implementing"
     ],
     "libcluster": [
       "elixir-implementing",
@@ -241,7 +203,6 @@
       "phoenix"
     ],
     "livebook": [
-      "livebook",
       "elixir-implementing",
       "elixir-planning"
     ],
@@ -251,7 +212,6 @@
       "elixir-implementing"
     ],
     "membrane": [
-      "membrane",
       "elixir-implementing",
       "elixir-planning"
     ],
@@ -279,7 +239,6 @@
       "elixir-implementing"
     ],
     "mix release": [
-      "elixir-deployment",
       "elixir-implementing"
     ],
     "mox": [
@@ -287,27 +246,21 @@
       "elixir-planning"
     ],
     "nerves": [
-      "nerves",
       "elixir-implementing"
     ],
     "net_kernel": [
-      "erpc",
       "elixir-implementing"
     ],
     "nif": [
       "elixir-implementing"
     ],
     "node.list": [
-      "erpc",
       "elixir-implementing",
       "elixir-planning"
     ],
     "oban": [
       "phoenix",
       "elixir-implementing"
-    ],
-    "ooxml": [
-      "ecma-376"
     ],
     "otp": [
       "elixir-implementing",
@@ -353,16 +306,6 @@
       "elixir-implementing",
       "phoenix-liveview"
     ],
-    "radxa": [
-      "nerves",
-      "radxa-5",
-      "buildroot"
-    ],
-    "raspberry pi 5": [
-      "nerves",
-      "rpi5-hailo",
-      "buildroot"
-    ],
     "rebar3": [
       "elixir-implementing"
     ],
@@ -375,9 +318,6 @@
       "elixir-implementing",
       "elixir-planning"
     ],
-    "release script": [
-      "elixir-deployment"
-    ],
     "repo": [
       "phoenix",
       "elixir-implementing"
@@ -385,25 +325,15 @@
     "review": [
       "elixir-reviewing"
     ],
-    "rpi5": [
-      "nerves",
-      "rpi5-hailo",
-      "buildroot"
-    ],
     "runtime.exs": [
-      "elixir-implementing",
-      "elixir-deployment"
+      "elixir-implementing"
     ],
     "rustler": [
       "elixir-implementing"
     ],
-    "scada": [
-      "live-industrial-web-ui"
-    ],
     "state machine": [
       "elixir-implementing",
-      "elixir-planning",
-      "state-machine"
+      "elixir-planning"
     ],
     "streamdata": [
       "elixir-implementing",
@@ -414,25 +344,21 @@
       "elixir-planning"
     ],
     "supervision tree": [
-      "elixir-planning",
-      "otp"
+      "elixir-planning"
     ],
     "supervisor": [
       "elixir-implementing",
       "elixir-planning"
     ],
     "tauri": [
-      "tauri-elixir",
       "elixir-implementing"
     ],
     "video pipeline": [
-      "membrane",
       "elixir-implementing",
       "phoenix-liveview"
     ],
     "vm.args": [
-      "elixir-implementing",
-      "elixir-deployment"
+      "elixir-implementing"
     ]
   }
 }

@@ -76,7 +76,7 @@ Both `rust-phase-skills` and `elixir-phase-skills` can be installed side-by-side
 - `phoenix/`, `phoenix-liveview/` — the framework skills (bundled because they're inseparable from idiomatic Elixir web work)
 - `hooks/bb-rationale-marker-elixir.py` — flags `# §§` rationale markers left in committed code
 - `hooks/bb-anti-slop-patterns.d/elixir.json` — 18 Elixir anti-slop patterns (try/rescue for ok/error, `Process.sleep` in tests, `String.to_atom` on user input, the three `else`-shape smells, etc.)
-- `hooks/bb-skill-triggers.d/elixir.json` — 110 keyword → skill mappings for Elixir / Phoenix / OTP / Ash / Nerves / Membrane topics
+- `hooks/bb-skill-triggers.d/elixir.json` — 99 keyword → skill mappings, all targeting the five bundled skills (`elixir-planning`, `elixir-implementing`, `elixir-reviewing`, `phoenix`, `phoenix-liveview`). Triggers are deliberately scoped to what this pack actually ships — keywords that previously pointed to non-bundled skills (OTP, Ash, Nerves, Membrane, Livebook, etc.) have been removed so installs don't suggest skills the user doesn't have.
 - `hooks/bb-post-generator-patterns.d/elixir.json` — checks for `mix phx.new` / `mix igniter.new` output (Phoenix `runtime.exs` port + secret_key_base guards)
 
 Extensions covered: `.ex`, `.exs`, `.heex`, `.leex`.
