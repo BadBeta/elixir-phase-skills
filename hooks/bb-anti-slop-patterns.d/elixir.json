@@ -1,0 +1,120 @@
+{
+  "elixir": {
+    "extensions": [
+      ".ex",
+      ".exs"
+    ],
+    "checks": [
+      {
+        "id": "rescue-catchall",
+        "cite": "elixir-reviewing / elixir \u00a7error-handling",
+        "severity": "block",
+        "regex": "(?m)^\\s*rescue\\s*\\n\\s*_\\s*->|(?m)^\\s*rescue\\s+_\\s+->",
+        "message": "`rescue _ ->` swallows ALL exceptions \u2014 including BEAM-internal ones, `ArgumentError` from library bugs, and OOM. Rescue specific exception modules (`rescue e in [Ecto.ConstraintError]`), or let it crash and be supervised."
+      },
+      {
+        "id": "try-rescue-for-expected-failure",
+        "cite": "elixir \u00a7error-handling (prefer with/case over try/rescue for expected failures)",
+        "severity": "warn",
+        "regex": "try\\s+do[\\s\\S]{0,300}?rescue",
+        "message": "`try/rescue` for control flow is an imperative idiom. For expected failures, prefer `case` on `{:ok, _} | {:error, _}` tuples or a `with` chain. Reserve `rescue` for genuinely exceptional conditions (third-party libs that raise)."
+      },
+      {
+        "id": "if-nil-check-instead-of-pattern-match",
+        "cite": "elixir \u00a7control-flow",
+        "severity": "warn",
+        "regex": "(?m)^\\s*if\\s+is_nil\\(|\\bif\\s+\\w+\\s*==\\s*nil\\b|\\bif\\s+\\w+\\s*!=\\s*nil\\b",
+        "message": "Nil checks with `if is_nil/1` or `== nil` are usually clearer as pattern matches on `nil | value` \u2014 either a `case` or a multi-clause function. Reach for `if` only when the condition isn't really a shape check."
+      },
+      {
+        "id": "process-send-after-instead-of-timer",
+        "cite": "elixir-planning / otp",
+        "severity": "warn",
+        "regex": "Process\\.send_after\\s*\\(\\s*self\\(\\)",
+        "message": "`Process.send_after(self(), ...)` for recurring work drifts and doesn't integrate with supervisor restart. For periodic scheduling, consider `Oban.Cron` (with persistence), `gen_statem` state_timeout, or a dedicated scheduler process."
+      },
+      {
+        "id": "elixir-process-sleep-in-test",
+        "cite": "elixir-reviewing \u00a77 flaky-test pitfall",
+        "severity": "warn",
+        "regex": "Process\\.sleep\\s*\\(",
+        "only_if_path_matches": "_test\\.exs?$|/test/",
+        "message": "`Process.sleep/1` in a test creates a race between the spawned work and the assertion. Passes on fast machines, fails under CI load. Replace with an explicit completion signal: `assert_receive {:done, _}, 500`, or `Task.await/2`, or a GenServer `handle_info` that notifies the test pid. See elixir-implementing \u00a75 test-essentials for the `assert_receive` pattern."
+      },
+      {
+        "id": "elixir-string-to-atom-untrusted",
+        "cite": "elixir-reviewing \u00a77 security / atom-table exhaustion",
+        "severity": "block",
+        "regex": "String\\.to_atom\\s*\\(",
+        "message": "`String.to_atom/1` converts a string to an atom WITHOUT checking the atom table. Atoms are never garbage-collected; the table cap is ~1M. A loop or untrusted-input source can exhaust it and crash the BEAM. Use `String.to_existing_atom/1` if the atom is guaranteed to exist already, or keep the string as a string. `Jason.decode!(json, keys: :atoms)` has the same problem \u2014 prefer default `:strings` keys at boundaries."
+      },
+      {
+        "id": "elixir-rebind-in-enum-each",
+        "cite": "elixir-reviewing \u00a77 / elixir-implementing \u00a71 rule 7",
+        "severity": "warn",
+        "regex": "Enum\\.each\\s*\\([^)]*?,\\s*fn[^)]*?->\\s*[a-z_][a-zA-Z0-9_]*\\s*=",
+        "message": "Rebinding inside `Enum.each/2` doesn't escape the anonymous function \u2014 the outer binding is unchanged. If you're accumulating, use `Enum.map/2` or `Enum.reduce/3`. `Enum.each/2` is for side-effect-only work (logging, IO). See elixir-implementing \u00a71 rule 7."
+      },
+      {
+        "id": "elixir-length-vs-pattern-match",
+        "cite": "elixir-reviewing \u00a77 / performance",
+        "severity": "warn",
+        "regex": "\\blength\\s*\\(\\s*[a-z_][a-zA-Z0-9_]*\\s*\\)\\s*(?:==\\s*0|>\\s*0|<\\s*1)",
+        "message": "`length(list) == 0` / `> 0` is O(n) \u2014 it walks the whole list. For emptiness, pattern-match: `[]` for empty, `[_ | _]` for non-empty. Use `match?([], list)` or function-head patterns. Saves traversal, expresses intent."
+      },
+      {
+        "id": "elixir-rescue-without-stacktrace",
+        "cite": "elixir-reviewing \u00a77.5 / archdo session 2026-04-24 review finding #2",
+        "severity": "warn",
+        "regex": "rescue\\s+\\w+\\s*->\\s*[^_]*?Exception\\.message\\(",
+        "skip_if_path_matches": "_test\\.exs?$",
+        "message": "`Exception.message(e)` in a rescue block discards the stacktrace \u2014 making debugging much harder. Use `Exception.format(:error, e, __STACKTRACE__)` to preserve the full trace. The stacktrace is only available inside the `rescue` block via `__STACKTRACE__`."
+      },
+      {
+        "id": "elixir-file-read-bang-in-lib",
+        "cite": "elixir-implementing \u00a72.4 / archdo session 2026-04-24 review finding #3",
+        "severity": "warn",
+        "regex": "File\\.read!\\s*\\(",
+        "skip_if_path_matches": "_test\\.exs?$|/test/|/seeds|/priv/|mix\\.exs$|/mix/tasks/",
+        "message": "`File.read!/1` crashes on unreadable files. In library/production code, prefer `File.read/1` with `case {:ok, content} -> ...; {:error, reason} -> ...` so the caller can handle the failure. Reserve `!` for scripts, seeds, and test fixtures where crashing is the correct response."
+      },
+      {
+        "id": "elixir-length-in-guard",
+        "cite": "elixir-implementing \u00a72.3 / archdo session 2026-04-24 review finding (suggest)",
+        "severity": "warn",
+        "regex": "when\\s+length\\s*\\(",
+        "message": "`length/1` in a guard traverses the entire list (O(n)) on every call. For emptiness checks, pattern match: `def f([])` and `def f([_ | _])`. For `length < 2`, use `def f([])` and `def f([_])`."
+      },
+      {
+        "id": "elixir-json-encode-nil",
+        "cite": "elixir-reviewing / data integrity \u2014 nil encodes to JSON null silently",
+        "severity": "warn",
+        "regex": "(?::json\\.encode|Jason\\.encode)!?\\s*\\(\\s*nil\\b",
+        "message": "`Jason.encode!(nil)` / `:json.encode(nil)` produces `\"null\"` \u2014 almost never the intent. A nil value reaching the encoder usually means an upstream lookup failed silently. Check the source: is this a missing Map.get, a failed Repo.get, or an uninitialized assign?"
+      },
+      {
+        "id": "elixir-gen-tcp-recv-no-timeout",
+        "cite": "elixir networking.md / gen_tcp \u2014 recv without timeout blocks forever",
+        "severity": "warn",
+        "regex": ":gen_tcp\\.recv\\s*\\(\\s*\\w+\\s*,\\s*\\d+\\s*\\)",
+        "message": "`:gen_tcp.recv/2` without a timeout blocks the calling process forever if the peer never sends. Use `:gen_tcp.recv(socket, length, timeout)` with an explicit timeout (e.g., 30_000). The 3-arity form returns `{:error, :timeout}` on expiry."
+      },
+      {
+        "id": "elixir-hardcoded-port",
+        "cite": "elixir-implementing \u00a71 rule 23 (SSOT) \u2014 hardcoded port outside config",
+        "severity": "warn",
+        "regex": "(?:port:|:port,|port\\s*=)\\s*(?:4000|4001|4369|8080|8443|9090)\\b",
+        "skip_if_path_matches": "/config/|_test\\.exs?$|/test/",
+        "message": "Hardcoded TCP port in production code. Ports are deployment policy \u2014 move to `config/runtime.exs` via `System.get_env(\"PORT\", \"4000\")` so each environment can override. Common offenders: 4000 (Phoenix default), 4001 (dev secondary), 8080/8443 (reverse proxy)."
+      },
+      {
+        "id": "elixir-magic-literal-outside-config",
+        "cite": "elixir-implementing \u00a71 rule 23 (proactive SSOT) + elixir-reviewing SSOT litmus",
+        "severity": "warn",
+        "regex": "@\\w*(?:timeout|delay|interval|retries|max_attempts|backoff)\\s+[0-9_]+",
+        "skip_if_path_matches": "/config/|/lib/[^/]+/config\\.ex$|/lib/[^/]+/constants\\.ex$|/lib/[^/]+_config\\.ex$|_test\\.exs?$",
+        "message": "Module attribute timeout/retry/backoff literal outside `config/*.exs` or a `MyApp.Config` / `MyApp.Constants` module. If this value encodes deliberate policy, it belongs in the SSOT home so the litmus holds (one place changes, every caller reads the new value). See elixir-implementing \u00a71 rule 23 (proactive) + elixir-planning \u00a710.5.1 `MyApp.Config` module pattern."
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "_about": "Hook entries owned by elixir-phase-skills. Installed on top of BB-skill-core.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/.claude/hooks/bb-rationale-marker-elixir.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
