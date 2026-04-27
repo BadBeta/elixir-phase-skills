@@ -116,6 +116,27 @@
         "regex": "@\\w*(?:timeout|delay|interval|retries|max_attempts|backoff)\\s+[0-9_]+",
         "skip_if_path_matches": "/config/|/lib/[^/]+/config\\.ex$|/lib/[^/]+/constants\\.ex$|/lib/[^/]+_config\\.ex$|_test\\.exs?$",
         "message": "Module attribute timeout/retry/backoff literal outside `config/*.exs` or a `MyApp.Config` / `MyApp.Constants` module. If this value encodes deliberate policy, it belongs in the SSOT home so the litmus holds (one place changes, every caller reads the new value). See elixir-implementing \u00a71 rule 23 (proactive) + elixir-planning \u00a710.5.1 `MyApp.Config` module pattern."
+      },
+      {
+        "id": "unless-with-else",
+        "cite": "elixir-reviewing \u00a7control-flow / Credo.Check.Refactor.UnlessWithElse",
+        "severity": "block",
+        "regex": "\\bunless\\b[^\\n]*,\\s*else:|\\bunless\\b[^\\n]*\\bdo\\b[\\s\\S]{0,1500}?\\belse\\b",
+        "message": "`unless ... else` inverts the condition twice \u2014 invert and use `if/else` instead. Block form (`unless cond do ... else ... end`) and keyword form (`unless cond, do: x, else: y`) both qualify. Credo's UnlessWithElse rule covers this."
+      },
+      {
+        "id": "if-elseif-chain",
+        "cite": "elixir-reviewing \u00a7control-flow (use cond for chained conditions)",
+        "severity": "warn",
+        "regex": "(?m)^\\s*else\\s+if\\b",
+        "message": "`else if` chain. Use `cond do ... end` \u2014 flatter, Elixir-idiomatic, each branch is its own predicate-action pair. If branches dispatch on a value's shape, prefer multi-clause function head with pattern matching. (`with ... else` is NOT this anti-pattern and does not fire here.)"
+      },
+      {
+        "id": "try-with-else",
+        "cite": "elixir-reviewing \u00a7error-handling (try/else is rarely justified)",
+        "severity": "warn",
+        "regex": "\\btry\\b\\s+do\\b[\\s\\S]{0,2000}?\\belse\\b",
+        "message": "`try do ... else ...` is rarely the right shape. The function the `try` wraps should return `{:ok, _} | {:error, _}` and the caller should `case` on it. Reserve `try/else` for genuinely exception-distinguishing library code."
       }
     ]
   }
