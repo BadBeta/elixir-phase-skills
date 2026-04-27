@@ -7,6 +7,10 @@ Three-phase Elixir skill family + Elixir-specific hooks. Layers on top of [BB-sk
 | `elixir-planning` | Architecture, contexts, supervision tree, OTP design, deployment strategy |
 | `elixir-implementing` | Idiomatic patterns, decision tables, BAD/GOOD pairs, TDD with ExUnit |
 | `elixir-reviewing` | PR review, debugging (recon, observer, sys.trace), profiling (Benchee, fprof) |
+| `phoenix` | Phoenix framework — endpoints, controllers, routers, contexts |
+| `phoenix-liveview` | LiveView lifecycle, components, hooks, state persistence, WASM/alpine integrations |
+
+Extensions covered: `.ex`, `.exs`, `.heex`, `.leex`.
 
 Plus:
 

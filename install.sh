@@ -65,7 +65,7 @@ cp -p "${SCRIPT_DIR}/hooks/bb-anti-slop-patterns.d/elixir.json" "${HOOKS_DIR}/bb
 cp -p "${SCRIPT_DIR}/hooks/bb-skill-triggers.d/elixir.json" "${HOOKS_DIR}/bb-skill-triggers.d/"
 
 echo "[3/4] copying elixir skills…"
-for sk in elixir-planning elixir-implementing elixir-reviewing; do
+for sk in elixir-planning elixir-implementing elixir-reviewing phoenix phoenix-liveview; do
     src="${SCRIPT_DIR}/${sk}"
     if [ -d "${src}" ]; then
         rm -rf "${SKILLS_DIR}/${sk}"

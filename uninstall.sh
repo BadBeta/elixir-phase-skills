@@ -17,7 +17,7 @@ rm -f "${HOOKS_DIR}/bb-rationale-marker-elixir.py"
 rm -f "${HOOKS_DIR}/bb-anti-slop-patterns.d/elixir.json"
 rm -f "${HOOKS_DIR}/bb-skill-triggers.d/elixir.json"
 
-for sk in elixir-planning elixir-implementing elixir-reviewing; do
+for sk in elixir-planning elixir-implementing elixir-reviewing phoenix phoenix-liveview; do
     rm -rf "${SKILLS_DIR}/${sk}"
 done
 

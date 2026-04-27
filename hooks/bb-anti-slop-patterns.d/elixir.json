@@ -2,7 +2,9 @@
   "elixir": {
     "extensions": [
       ".ex",
-      ".exs"
+      ".exs",
+      ".heex",
+      ".leex"
     ],
     "checks": [
       {
