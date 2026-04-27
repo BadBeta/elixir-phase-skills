@@ -54,6 +54,7 @@ fi
 
 mkdir -p "${HOOKS_DIR}/bb-anti-slop-patterns.d"
 mkdir -p "${HOOKS_DIR}/bb-skill-triggers.d"
+mkdir -p "${HOOKS_DIR}/bb-post-generator-patterns.d"
 mkdir -p "${SKILLS_DIR}"
 
 echo "[1/4] copying elixir-pack hooks…"
@@ -63,6 +64,8 @@ chmod +x "${HOOKS_DIR}/bb-rationale-marker-elixir.py" 2>/dev/null || true
 echo "[2/4] copying drop-in fragments…"
 cp -p "${SCRIPT_DIR}/hooks/bb-anti-slop-patterns.d/elixir.json" "${HOOKS_DIR}/bb-anti-slop-patterns.d/"
 cp -p "${SCRIPT_DIR}/hooks/bb-skill-triggers.d/elixir.json" "${HOOKS_DIR}/bb-skill-triggers.d/"
+[ -f "${SCRIPT_DIR}/hooks/bb-post-generator-patterns.d/elixir.json" ] && \
+  cp -p "${SCRIPT_DIR}/hooks/bb-post-generator-patterns.d/elixir.json" "${HOOKS_DIR}/bb-post-generator-patterns.d/"
 
 echo "[3/4] copying elixir skills…"
 for sk in elixir-planning elixir-implementing elixir-reviewing phoenix phoenix-liveview; do

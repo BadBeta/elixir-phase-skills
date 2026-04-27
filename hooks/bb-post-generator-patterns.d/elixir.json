@@ -1,0 +1,23 @@
+{
+  "_about": "Post-generator scan checks for Elixir generators (mix phx.new, mix igniter.new). Fire once after the generator command completes, against the new project tree.",
+  "checks": [
+    {
+      "id": "phx-runtime-port-unguarded",
+      "file_glob": "config/runtime.exs",
+      "regex": "^\\s*config\\s+:[a-z_][a-z0-9_]*,\\s+\\w+Web\\.Endpoint,",
+      "skip_if_in_file": "System\\.get_env\\(\"PORT\"\\)",
+      "cite": "phoenix §Configuration Precedence",
+      "severity": "warn",
+      "message": "config/runtime.exs configures Endpoint without a System.get_env(\"PORT\") fallback. The phx.new template is fine in prod (PORT is set) but causes :eaddrinuse / silent port-override bugs in dev when the default 4000 is busy. Fix: read port from System.get_env(\"PORT\") || \"4000\" before the Endpoint config block."
+    },
+    {
+      "id": "phx-runtime-secret-key-base-unguarded",
+      "file_glob": "config/runtime.exs",
+      "regex": "^\\s*secret_key_base\\s*=",
+      "skip_if_in_file": "System\\.get_env\\(\"SECRET_KEY_BASE\"\\)|System\\.fetch_env!\\(\"SECRET_KEY_BASE\"\\)",
+      "cite": "phoenix §Configuration Precedence",
+      "severity": "block",
+      "message": "secret_key_base in runtime.exs without an env-var read. Generated runtime.exs reads SECRET_KEY_BASE from env in prod; if you removed that, the generator default is wrong for production. Restore the System.fetch_env!/get_env read."
+    }
+  ]
+}
