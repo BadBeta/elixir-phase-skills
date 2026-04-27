@@ -18,8 +18,8 @@
         "id": "try-rescue-for-expected-failure",
         "cite": "elixir \u00a7error-handling (prefer with/case over try/rescue for expected failures)",
         "severity": "warn",
-        "regex": "try\\s+do[\\s\\S]{0,300}?rescue",
-        "message": "`try/rescue` for control flow is an imperative idiom. For expected failures, prefer `case` on `{:ok, _} | {:error, _}` tuples or a `with` chain. Reserve `rescue` for genuinely exceptional conditions (third-party libs that raise)."
+        "regex": "(?m)try\\s+do[\\s\\S]{0,300}?^\\s*rescue\\s+[a-z_][a-zA-Z0-9_]*\\s*->",
+        "message": "`try/rescue` binding the exception to a lowercase variable with no `in Module` clause (e.g. `rescue e ->` or `rescue _e ->`) is the textbook smell \u2014 you're catching every exception type to convert it into a return value. For expected failures, prefer `case` on `{:ok, _} | {:error, _}` tuples or a `with` chain. If the call genuinely raises (third-party lib, `!` function), rescue the SPECIFIC exception module: `rescue Ecto.NoResultsError ->` or `rescue e in Postgrex.Error -> reraise wrap(e), __STACKTRACE__`. The catchall (`rescue _ ->`) is a separate block-severity rule."
       },
       {
         "id": "if-nil-check-instead-of-pattern-match",
