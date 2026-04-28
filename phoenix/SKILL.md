@@ -20,6 +20,7 @@ description: Phoenix Framework guidance including architecture, Plug, contexts, 
 11. ALWAYS set `same_site`, `http_only`, and `secure` on session cookies in production
 12. ALWAYS call `delete_csrf_token/0` after login to prevent session fixation
 13. ALWAYS prefer generators (`mix phx.gen.*`) over hand-writing contexts, schemas, and migrations — generators produce correct, tested, consistent code
+14. ALWAYS use battle-tested libraries for authentication, password hashing, session management, cryptography, JWTs, OAuth, secret comparison, and access tokens — NEVER hand-roll these. Hand-rolling a security-critical primitive is an exception that requires explicit justification AND a security review; the default answer is "no." A "custom requirement" (non-standard `Authorization` scheme, custom claims shape, unusual session storage, exotic token format) is almost always a configuration parameter on a real library, NOT a reason to write your own. If you find yourself reaching for raw primitives (`Joken` directly, `:crypto` plus your own plug pipeline, hand-written token format) ask: which library wraps these and exposes the customization I need? Almost always the answer exists. Canonical Phoenix picks: `phx.gen.auth` (sessions+cookies for browser apps), Guardian (JWT for JSON APIs — `VerifyHeader`'s `scheme:` option handles non-standard `Authorization` headers like `Token <jwt>`), Ueberauth (OAuth providers), `bcrypt_elixir` / `argon2_elixir` (password hashing — lower rounds in `config/test.exs`, never via a behaviour-and-mock), `Plug.Crypto.secure_compare/2` (constant-time secret compare). The cost of using a library is one dep + one config block; the cost of hand-rolling is the bug you ship and don't notice.
 
 ## Decision Tables
 
@@ -754,6 +755,221 @@ defp mount_current_scope(socket, session) do
     end || Scope.for_user(nil)
   end)
 end
+```
+
+### JWT Auth via Guardian (JSON APIs)
+
+`phx.gen.auth` is **session + cookie** — wrong fit for stateless JSON APIs that send `Authorization: <something> <token>` from a JS client, mobile app, or external consumer. For JWT auth in a Phoenix JSON API, use **Guardian** (`{:guardian, "~> 2.3"}`). It's the de-facto standard, has been in production use across thousands of apps for ~10 years, and handles every piece you would otherwise hand-roll: signing, verification, claims, header parsing (with custom schemes), pipeline plugs, token rotation/revocation hooks.
+
+**Decision — when to use what:**
+
+| Need | Use |
+|---|---|
+| Browser-driven app, server-rendered or LiveView, login form posts back | `phx.gen.auth` (sessions + cookies) |
+| JSON API consumed by SPA, mobile, external clients; bearer-style token | **Guardian** |
+| Both (web app + first-party API) | `phx.gen.auth` for the web layer + Guardian for the API |
+| Cross-service / federated auth | OAuth provider (Auth0, Keycloak, AWS Cognito) — not Guardian |
+| Hand-roll JWT signing because "the spec uses a custom header scheme" | **No.** Guardian's `VerifyHeader` takes a `scheme:` option (see below). |
+
+**Module setup — implement the Guardian behaviour for your User struct:**
+
+```elixir
+# lib/my_app/accounts/guardian.ex
+defmodule MyApp.Accounts.Guardian do
+  use Guardian, otp_app: :my_app
+
+  alias MyApp.Accounts
+  alias MyApp.Accounts.User
+
+  @impl Guardian
+  def subject_for_token(%User{id: id}, _claims), do: {:ok, to_string(id)}
+  def subject_for_token(_, _), do: {:error, :invalid_resource}
+
+  @impl Guardian
+  def resource_from_claims(%{"sub" => id}) do
+    case Accounts.fetch_user(id) do
+      {:ok, user} -> {:ok, user}
+      {:error, :not_found} -> {:error, :resource_not_found}
+    end
+  end
+
+  def resource_from_claims(_), do: {:error, :invalid_claims}
+end
+```
+
+**Config — secret_key per environment:**
+
+```elixir
+# config/config.exs (no secret here)
+config :my_app, MyApp.Accounts.Guardian,
+  issuer: "my_app",
+  ttl: {7, :days}
+
+# config/test.exs — fixed test secret, short TTL
+config :my_app, MyApp.Accounts.Guardian,
+  secret_key: "test-only-guardian-secret-32-bytes-or-more-xxxxxxxxxxxxx",
+  ttl: {1, :hour}
+
+# config/runtime.exs — production secret from env, fail loudly if absent
+if config_env() == :prod do
+  config :my_app, MyApp.Accounts.Guardian,
+    secret_key:
+      System.get_env("GUARDIAN_SECRET_KEY") ||
+        raise "GUARDIAN_SECRET_KEY missing — generate with `mix guardian.gen.secret`"
+end
+```
+
+**Pipeline — including custom Authorization scheme:**
+
+The `VerifyHeader` plug accepts a `scheme:` option. **Custom header schemes (e.g. `Authorization: Token <jwt>` instead of `Bearer <jwt>`) are a one-line library config — never a reason to hand-roll a header-parsing plug.**
+
+```elixir
+# lib/my_app_web/auth/pipeline.ex
+defmodule MyAppWeb.Auth.Pipeline do
+  use Guardian.Plug.Pipeline,
+    otp_app: :my_app,
+    module: MyApp.Accounts.Guardian,
+    error_handler: MyAppWeb.Auth.ErrorHandler
+
+  # Default scheme is "Bearer". Override for non-standard specs.
+  plug Guardian.Plug.VerifyHeader, scheme: "Token"
+  plug Guardian.Plug.LoadResource, allow_blank: true
+  plug MyAppWeb.Auth.AssignCurrentUser
+end
+
+defmodule MyAppWeb.Auth.AssignCurrentUser do
+  @moduledoc false
+  import Plug.Conn
+  def init(opts), do: opts
+  def call(conn, _), do: assign(conn, :current_user, Guardian.Plug.current_resource(conn))
+end
+```
+
+**Error handler — JSON shape for unauthenticated requests:**
+
+```elixir
+defmodule MyAppWeb.Auth.ErrorHandler do
+  @behaviour Guardian.Plug.ErrorHandler
+  import Plug.Conn
+
+  @impl Guardian.Plug.ErrorHandler
+  def auth_error(conn, {_type, _reason}, _opts) do
+    body = Jason.encode!(%{errors: %{body: ["unauthorized"]}})
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(401, body)
+  end
+end
+```
+
+**Require-user plug — for routes that need a logged-in resource:**
+
+```elixir
+defmodule MyAppWeb.Auth.RequireUser do
+  import Plug.Conn
+  alias MyApp.Accounts.User
+
+  def init(opts), do: opts
+  def call(%Plug.Conn{assigns: %{current_user: %User{}}} = conn, _), do: conn
+  def call(conn, _) do
+    body = Jason.encode!(%{errors: %{body: ["unauthorized"]}})
+    conn |> put_resp_content_type("application/json") |> send_resp(401, body) |> halt()
+  end
+end
+```
+
+**Router wiring — two pipelines (optional auth + required auth):**
+
+```elixir
+pipeline :optional_auth_api do
+  plug :accepts, ["json"]
+  plug MyAppWeb.Auth.Pipeline
+end
+
+pipeline :authenticated_api do
+  plug :accepts, ["json"]
+  plug MyAppWeb.Auth.Pipeline
+  plug MyAppWeb.Auth.RequireUser
+end
+
+scope "/api", MyAppWeb do
+  pipe_through :api
+  post "/users", UserController, :create        # public — register
+  post "/users/login", UserController, :login   # public — login
+end
+
+scope "/api", MyAppWeb do
+  pipe_through :authenticated_api
+  get "/user", UserController, :current
+  put "/user", UserController, :update
+end
+```
+
+**Issuing tokens — at register, login, and any time you need a fresh one:**
+
+```elixir
+def login(conn, %{"user" => %{"email" => email, "password" => pw}}) do
+  with {:ok, user} <- Accounts.authenticate(email, pw),
+       {:ok, token, _claims} <- MyApp.Accounts.Guardian.encode_and_sign(user) do
+    render(conn, :show, user: user, token: token)
+  end
+end
+```
+
+**Test helper — generate tokens directly without going through HTTP:**
+
+```elixir
+# In test/support/conn_case.ex
+def authed_conn(conn, user) do
+  {:ok, token, _claims} = MyApp.Accounts.Guardian.encode_and_sign(user)
+  put_req_header(conn, "authorization", "Token #{token}")
+end
+
+# In a controller test
+test "200 with current user", %{conn: conn} do
+  user = user_fixture()
+  conn = authed_conn(conn, user) |> get(~p"/api/user")
+  assert json_response(conn, 200)["user"]["email"] == user.email
+end
+```
+
+**Token revocation — when you need it:**
+
+By default Guardian tokens are stateless: revocation by deletion isn't possible without checking a store. Add `{:guardian_db, "~> 3.0"}` to track issued tokens in Postgres and `Guardian.revoke/1` them on logout. Most JSON APIs skip this and rely on short TTLs + reissue.
+
+**Anti-patterns:**
+
+```elixir
+# BAD — hand-rolled JWT plug because the spec uses "Token" not "Bearer"
+defmodule MyAppWeb.Plugs.JwtAuth do
+  def call(conn, _) do
+    case get_req_header(conn, "authorization") do
+      ["Token " <> token] ->
+        case MyApp.Token.verify(token) do  # also hand-rolled
+          {:ok, user_id} -> assign(conn, :current_user, MyApp.Accounts.get_user!(user_id))
+          _ -> conn |> send_resp(401, "") |> halt()
+        end
+      _ -> conn |> send_resp(401, "") |> halt()
+    end
+  end
+end
+
+# GOOD — Guardian's VerifyHeader takes the scheme as an option
+plug Guardian.Plug.VerifyHeader, scheme: "Token"
+```
+
+```elixir
+# BAD — using Joken (raw JWT primitives) directly, then writing a plug around it
+defmodule MyApp.Token do
+  use Joken.Config
+  def sign(user), do: ...
+  def verify(token), do: ...
+end
+
+# GOOD — Guardian wraps Joken, gives you a behaviour, plug pipeline, and
+# revocation hooks. Joken alone forces you to rebuild all of that.
+use Guardian, otp_app: :my_app
 ```
 
 ### OAuth Authentication Flow

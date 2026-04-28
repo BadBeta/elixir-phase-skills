@@ -5,10 +5,10 @@
       "id": "phx-runtime-port-unguarded",
       "file_glob": "config/runtime.exs",
       "regex": "^\\s*config\\s+:[a-z_][a-z0-9_]*,\\s+\\w+Web\\.Endpoint,",
-      "skip_if_in_file": "System\\.get_env\\(\"PORT\"\\)",
+      "skip_if_in_file": "System\\.get_env\\(\"PORT\"[,)]",
       "cite": "phoenix §Configuration Precedence",
       "severity": "warn",
-      "message": "config/runtime.exs configures Endpoint without a System.get_env(\"PORT\") fallback. The phx.new template is fine in prod (PORT is set) but causes :eaddrinuse / silent port-override bugs in dev when the default 4000 is busy. Fix: read port from System.get_env(\"PORT\") || \"4000\" before the Endpoint config block."
+      "message": "config/runtime.exs configures Endpoint without a System.get_env(\"PORT\") fallback. The phx.new template is fine in prod (PORT is set) but causes :eaddrinuse / silent port-override bugs in dev when the default 4000 is busy. Fix: read port from System.get_env(\"PORT\") || \"4000\", or use the two-arg form System.get_env(\"PORT\", \"4000\"), before the Endpoint config block."
     },
     {
       "id": "phx-runtime-secret-key-base-unguarded",
