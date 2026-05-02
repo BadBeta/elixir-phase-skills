@@ -160,6 +160,7 @@ Every review finding should answer: "why wouldn't a linter catch this?" If the a
 - [ ] `@spec` and `@doc` on every new or modified public function
 - [ ] No `@moduledoc` missing on public modules (`@moduledoc false` is fine for internal)
 - [ ] No cross-context `Repo` calls (see §7.1)
+- [ ] **Cross-context struct destructure** (`%OtherContext.SomeStruct{field: f} = value` in a caller's function head, OR `value.internal_field` reaching into another context's data) — flag unless that struct is documented as a public data structure (Plug.Conn / Date / Ecto.Changeset style). If it's an "opaque handle" (MapSet / Ecto.Query style), the caller should use accessor functions or operations, not pattern-match the fields. See [elixir-planning architecture-patterns.md §4.12](../elixir-planning/architecture-patterns.md). Severity: **request-change** if the struct's owning context has documented fields as private; **suggest** if undocumented (and propose deciding the opacity policy).
 - [ ] No `String.to_atom(user_input)` (see §7.8)
 - [ ] No `try/rescue` for expected failures (see §7.4)
 - [ ] No `Process.sleep` in tests (see §7.7)

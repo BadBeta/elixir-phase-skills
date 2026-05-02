@@ -77,6 +77,7 @@ Every item below has a concrete answer before any implementation begins. If any 
 - [ ] Every context named with its responsibility in one sentence (§6).
 - [ ] Data ownership: every table/entity has exactly one owning context (§7.1).
 - [ ] Context relationships mapped: caller → callee, and the public API function names that bridge them (§6.5).
+- [ ] **For every struct that crosses a context boundary**: opacity decision is made — "opaque handle" (`@opaque` + accessor functions, like MapSet/Ecto.Query) or "public data structure" (fields documented as API, like Plug.Conn/Date). See §6.7 + [architecture-patterns.md §4.12](architecture-patterns.md). "We'll decide when callers reach in" is not an answer — once they reach in, the field shape IS public API and renaming is a breaking change.
 
 **Processes & supervision**
 - [ ] The full supervision tree drawn (ASCII, Mermaid, or list — doesn't matter which, but it must be drawn). Every supervised process named with its restart strategy (§8.3).
@@ -954,6 +955,7 @@ When designing a context's public API:
 | Validate options with `Keyword.validate!/2` | Reject typos, document accepted options |
 | `defdelegate` for pure pass-through to internals | Keeps context as a clean facade |
 | Regular `def` when you add logging, telemetry, cross-cutting logic | The context is more than a namespace — it's the place for cross-cutting concerns |
+| **Decide opacity for every struct that crosses the boundary** | Without this, the struct's field shape silently becomes part of your public API. Once 11 callers destructure it, renaming a field is a breaking change. Pick "opaque handle" (MapSet/Ecto.Query — `@opaque` + accessor functions) or "public data structure" (Plug.Conn/Date — fields documented as API) **explicitly per struct**. Defer to [architecture-patterns.md §4.12](architecture-patterns.md) for the decision table, mechanics, and migration path. |
 
 ```elixir
 defmodule MyApp.Catalog do

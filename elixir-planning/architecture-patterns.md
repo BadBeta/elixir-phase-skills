@@ -527,6 +527,218 @@ Symptoms that a behaviour is premature:
 
 **Replace with a plain module** until you have a second real implementation or a clear test-double use case.
 
+### 4.12 Boundary opacity — exposed structs vs opaque handles
+
+A context boundary has TWO contracts: **functions** (covered in §4.7–§4.11) and **the data structures those functions accept and return**. Both are public API. Both can be public or hidden. The function side is well-understood — define `@callback`, accept and return them. The data side is where most Elixir codebases trip: a context exposes a struct, callers pattern-match on the fields, and now the struct's *internal layout* has become public API. Renaming an index field becomes a breaking change.
+
+This section is the planning decision: **for each struct that crosses your context boundary, decide whether its field shape is part of the public contract or an implementation detail.** Get it wrong and you'll discover later — when you want to swap the underlying storage, change the index shape, or add a new representation — that 11 callers destructure your "internal" struct and you have to rewrite all of them.
+
+#### 4.12.1 The two patterns from the Elixir stdlib + Phoenix/Ecto
+
+Real Elixir libraries split cleanly into two camps. Recognize which side a candidate struct belongs to *before* writing the first caller:
+
+| Camp | "Opaque handle" | "Public data structure" |
+|---|---|---|
+| Examples | `MapSet`, `Date.Range`, `Decimal`, `Ecto.Query`, `Ecto.Changeset` (mostly), `Regex`, `URI` (return value of `URI.parse/1`), `:queue`, `:gb_trees`, `:dets` table refs | `Plug.Conn`, `Date`, `Time`, `DateTime`, `NaiveDateTime`, `Ecto.Changeset` (`changeset.errors`, `changeset.changes`), `Phoenix.Socket`, `Ecto.Schema` user structs |
+| Field access from outside | Forbidden — by `@opaque` declaration AND/OR documentation prose ("the struct fields are private and must not be accessed directly") | Encouraged — `date.year`, `conn.assigns`, `changeset.errors` are documented public API |
+| How callers operate on it | Through accessor functions: `MapSet.size/1`, `Ecto.Query.from/2`, `URI.merge/2` | Through field access AND helper functions both: `conn.assigns[:user]`, `Plug.Conn.assign(conn, :user, u)` |
+| Underlying representation | **Free to change** between releases — that's the whole point | **Locked** — adding a field is the only safe change; renaming or removing is breaking |
+| Pattern-match on the struct? | Only `match?(%X{}, value)` to verify type — never destructure fields | Yes, freely: `def f(%Plug.Conn{request_path: "/" <> rest})` |
+
+**MapSet's actual rule (from official docs):** *"the struct fields are private and must not be accessed directly; use the functions in this module to perform operations on sets."* No `@opaque` — but the convention is enforced by code review and documentation.
+
+**Ecto.Query's actual rule (from official docs):** *"Users of Ecto must consider this struct as opaque and not access its field directly. Authors of adapters may read its contents, but never modify them."* Adapter authors are explicitly carved out as a privileged consumer.
+
+**Plug.Conn's actual contract:** the struct fields ARE the API. `request_path`, `assigns`, `private`, `resp_body` are documented as part of the request/response model. Adding a Plug.Conn field is a breaking-change consideration.
+
+#### 4.12.2 Decision — which camp does this struct belong to?
+
+| Question | Lean opaque handle | Lean public data structure |
+|---|---|---|
+| Is the struct *derived data* (built from something else: a query, a parsed input, an indexed graph)? | Yes | Less so |
+| Will the underlying representation plausibly change? (different storage, different index, different library) | Yes | No — the shape IS the model |
+| Are the fields useful only via behaviour-style operations (size, member, merge, render)? | Yes | No — callers genuinely need the values (date.year, conn.params) |
+| Would renaming a field break callers in a way that surprises me? | Yes — opaque it now, rename freely later | No — the field name IS the documented contract |
+| Is this the "request/response" or "domain entity" of a context? | Less likely | Yes — Plug.Conn, Ecto.Schema user structs |
+| Is this an "index", "graph", "query", "set", "queue", or other algorithmic data structure? | Yes | No |
+| Will I want to mock or substitute the struct in tests? | Yes — opacity enables `Mox.defmock` on a behaviour over the type | No — public structs are matched directly in tests |
+| Are there 5+ external pattern-match sites on different fields already? | Sign you're already in "public data structure" camp by accident — decide explicitly | Already public; just document |
+
+**Rule of thumb:** if the struct represents "the *result* of doing some work" (a built index, a parsed query, a computed set), it's an opaque handle. If it represents "a *thing in the domain*" (a date, a request, an order), it's a public data structure. Compute → opaque; entity → exposed.
+
+#### 4.12.3 Mechanics — how to actually make a struct opaque
+
+Three layers of enforcement, listed in order of strictness:
+
+```elixir
+defmodule MyApp.Catalog.SearchIndex do
+  @moduledoc """
+  Built search index returned by `MyApp.Catalog.build_index/1`.
+
+  This struct is **opaque** — callers must use the functions in
+  `MyApp.Catalog` (or this module) to operate on it. The internal
+  representation may change without notice between releases.
+  """
+
+  # Layer 1 — Dialyzer-enforced opacity. External callers writing
+  # `%SearchIndex{tree: t}` get a Dialyzer warning. Runtime is unaffected.
+  @opaque t :: %__MODULE__{
+            tree: :gb_trees.tree(),
+            term_count: non_neg_integer(),
+            built_at: DateTime.t()
+          }
+
+  defstruct [:tree, :term_count, :built_at]
+
+  # Layer 2 — accessor functions. Every field outside callers genuinely
+  # need gets a one-liner. These ARE the public API.
+  @spec term_count(t()) :: non_neg_integer()
+  def term_count(%__MODULE__{term_count: n}), do: n
+
+  @spec built_at(t()) :: DateTime.t()
+  def built_at(%__MODULE__{built_at: ts}), do: ts
+
+  # Layer 3 — operations. Most "field access" is actually "do a thing
+  # to the index." Expose those as named operations, not as field reads.
+  @spec lookup(t(), String.t()) :: [Product.t()]
+  def lookup(%__MODULE__{tree: tree}, term), do: # ...
+
+  @spec merge(t(), t()) :: t()
+  def merge(%__MODULE__{} = a, %__MODULE__{} = b), do: # ...
+end
+```
+
+**At the context boundary**, re-export the operations through the context facade so callers don't even need to know `SearchIndex` exists as a module:
+
+```elixir
+defmodule MyApp.Catalog do
+  alias MyApp.Catalog.SearchIndex
+
+  @spec build_index(keyword()) :: SearchIndex.t()
+  def build_index(opts), do: SearchIndex.build(opts)
+
+  defdelegate lookup(index, term), to: SearchIndex
+  defdelegate term_count(index), to: SearchIndex
+  defdelegate built_at(index), to: SearchIndex
+  defdelegate merge(a, b), to: SearchIndex
+end
+```
+
+Now external callers write `Catalog.lookup(idx, "widget")` — they never touch `SearchIndex` as a name, they never see its fields, the entire internal representation can change.
+
+#### 4.12.4 What opaque handles unlock — the architectural payoff
+
+Opaque is not bookkeeping. It's the precondition for four substantive capabilities the boundary cannot offer if its data shape leaks:
+
+1. **Substitutability of representation.** Today it's `%SearchIndex{tree: gb_tree}`. Tomorrow you want to back it with ETS, an external service, a CRDT, a memoized cache — all transparent to callers if and only if they go through accessor functions. With field destructure, every consumer is now part of the migration.
+2. **Mockability via behaviour.** Lift the read API to a `@behaviour` and the opaque handle becomes the adapter's term. `Mox.defmock(MyApp.Catalog.SearchIndexMock, for: MyApp.Catalog.SearchIndex.Behaviour)` is now possible. With exposed fields, every test has to construct a real struct — opacity is the enabler.
+3. **Black-box testability.** Tests assert on observable operations (`Catalog.lookup(idx, "x") == [%Product{}]`) instead of internal shape (`idx.tree == ...`). The implementation can be rewritten without rewriting the tests.
+4. **Honest boundary metrics.** Tools that count "external references to internal modules" (Archdo's leak count, Boundary's checks, Recode's analysis) will correctly report ~0 for an opaque type. With exposed fields, every `%SearchIndex{tree: t} = idx` pattern is a measured leak — and the tool is right to flag it.
+
+#### 4.12.5 Anti-patterns at the data boundary
+
+```elixir
+# BAD — context exposes a struct that's "internal" by convention only
+defmodule MyApp.Catalog do
+  def build_index(opts), do: SearchIndex.build(opts)  # returns %SearchIndex{}
+end
+
+defmodule MyApp.Catalog.SearchIndex do
+  defstruct [:tree, :count, :built_at]                # no @opaque
+  # No accessor functions; callers reach in.
+end
+
+# Caller — destructures the "internal" struct
+defmodule MyAppWeb.SearchController do
+  def index(conn, _params) do
+    %SearchIndex{tree: tree, count: c} = Catalog.build_index([])
+    # Now the controller depends on SearchIndex's exact field layout.
+    # Renaming :tree to :index breaks this controller.
+  end
+end
+```
+
+```elixir
+# GOOD — opaque + accessors via the context facade
+defmodule MyApp.Catalog.SearchIndex do
+  @opaque t :: %__MODULE__{tree: :gb_trees.tree(), count: non_neg_integer(), built_at: DateTime.t()}
+  defstruct [:tree, :count, :built_at]
+  def lookup(%__MODULE__{tree: t}, term), do: # ...
+  def count(%__MODULE__{count: c}), do: c
+end
+
+defmodule MyApp.Catalog do
+  defdelegate lookup(index, term), to: __MODULE__.SearchIndex
+  defdelegate count(index), to: __MODULE__.SearchIndex
+end
+
+defmodule MyAppWeb.SearchController do
+  def index(conn, _params) do
+    idx = Catalog.build_index([])
+    results = Catalog.lookup(idx, conn.params["q"])
+    render(conn, :index, results: results, total: Catalog.count(idx))
+  end
+end
+```
+
+```elixir
+# BAD — choosing "opaque" for a struct that genuinely IS the public model
+defmodule MyApp.Accounts.User do
+  @opaque t :: %__MODULE__{id: integer(), email: String.t(), name: String.t()}
+  defstruct [:id, :email, :name]
+  def email(%__MODULE__{email: e}), do: e
+  def name(%__MODULE__{name: n}), do: n
+  def id(%__MODULE__{id: i}), do: i
+end
+# A user IS the entity. Forcing User.email(user) instead of user.email
+# adds noise without buying substitutability — there's no other "user"
+# representation worth swapping to. This is opacity for opacity's sake.
+
+# GOOD — public data structure with documented field shape
+defmodule MyApp.Accounts.User do
+  @type t :: %__MODULE__{id: pos_integer() | nil, email: String.t(), name: String.t()}
+  defstruct [:id, :email, :name]
+  # Fields are public; callers write user.email freely.
+  # Behaviour functions still go through the context: Accounts.full_name(user).
+end
+```
+
+```elixir
+# BAD — leaking the opaque type in a function spec that returns its internals
+@spec internals(t()) :: %{tree: :gb_trees.tree(), count: non_neg_integer()}
+def internals(%__MODULE__{tree: t, count: c}), do: %{tree: t, count: c}
+# This is a back-door — opacity is broken the moment any function exposes
+# the same fields under a different name.
+
+# GOOD — operations only; no "internals", no "to_map", no field re-exposure
+@spec stats(t()) :: %{term_count: non_neg_integer(), built_at: DateTime.t()}
+def stats(%__MODULE__{count: c, built_at: ts}), do: %{term_count: c, built_at: ts}
+# Returns a derived view, named for what it is, not the struct's shape.
+```
+
+#### 4.12.6 Migration path — retrofitting opacity onto an exposed struct
+
+If you discover (via leak metrics, refactor friction, or mock pain) that an "internal" struct has been treated as public:
+
+1. **Census** — `grep -rn '%SearchIndex{' lib/` to enumerate every external pattern-match. If the count is over ~10 distinct field uses, the migration is real work.
+2. **Add accessor functions** for every field that's actually used externally. Keep them `def`, give them `@spec`s, document them.
+3. **Add operations** for every "I'm reaching into the struct to do X" case. Often those reveal that the same logic is duplicated across callers — fold it into the operation.
+4. **Mark `@opaque`** on the type. Run `mix dialyzer` — every external pattern-match now warns. Each warning is a caller to fix.
+5. **Fix the warnings caller-by-caller.** Replace `%SearchIndex{tree: t} = idx` with `t = SearchIndex.tree(idx)` (if you absolutely must expose tree) or with the operation that uses it (`SearchIndex.lookup(idx, term)`).
+6. **Re-route through the context facade.** Add `defdelegate` re-exports on the context module so callers stop importing the internal module's name at all.
+7. **Field-check the metric.** Whatever boundary tool you use should now report dramatically fewer leaks.
+
+This is one of the highest-leverage refactors for a context whose internals have leaked into too many callers.
+
+#### 4.12.7 When NOT to opaque
+
+- **The struct represents an entity in the domain language** (User, Order, Product, Page). The fields are the model. Opacity adds noise. Use a regular `@type` and document the fields.
+- **The struct is owned by Phoenix/Ecto/another framework** and is part of THEIR contract (Plug.Conn, Ecto.Changeset, Phoenix.Socket). Their opacity decisions trump yours; matching their fields is normal and safe.
+- **Only one consumer exists, in the same context** — opacity buys nothing. Wait for the second consumer.
+- **You're about to add accessors that 1-to-1 mirror the struct's fields** with no business logic — that's pure boilerplate. Ask: are these fields really an implementation detail, or are they the API? If the latter, expose the type (`@type`) and skip the accessors.
+
+---
+
 ### 4.6 Migration path — retrofitting hexagonal
 
 If you have an existing codebase with direct Stripe calls in your domain, here's the migration:
