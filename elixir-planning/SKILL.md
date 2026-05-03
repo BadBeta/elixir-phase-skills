@@ -912,7 +912,7 @@ Contexts don't exist in isolation — they relate to each other in specific ways
 | **Conformist** | You adapt to an external model | Anti-corruption layer translates their types to yours |
 | **Separate ways** | Contexts are independent | No direct communication, possibly PubSub |
 
-**Boundary atom-safety discipline (Pass 3 cross-cut):** every external string identifier crossing into a context — sort key from a query string, action name from a webhook, role name from a JWT claim, channel topic suffix — stays a string OR converts via `String.to_existing_atom/1` against a closed allowlist (`Ecto.Enum` is the canonical pattern). Never `String.to_atom/1` on request data. See §1 rule 24.
+**Boundary atom-safety discipline:** every external string identifier crossing into a context — sort key from a query string, action name from a webhook, role name from a JWT claim, channel topic suffix — stays a string OR converts via `String.to_existing_atom/1` against a closed allowlist (`Ecto.Enum` is the canonical pattern). Never `String.to_atom/1` on request data. See §1 rule 24.
 
 ### 6.6 Anti-corruption layer (ACL)
 

@@ -1559,7 +1559,7 @@ end
 
 The `Plug.Session.Cookie` store and `Phoenix.Token` are the production references for the ETF path; `Plug.Parsers.JSON` is the reference for the JSON-DTO path.
 
-### 5.12 Logger.metadata propagation across async boundaries (Pass 13)
+### 5.12 Logger.metadata propagation across async boundaries
 
 `Logger.metadata` is per-process. A task spawned from a request handler does **NOT** inherit the request's `trace_id` / `request_id` / `tenant_id`. Any log line or telemetry event the task emits will be orphan — invisible when an operator searches by correlation ID.
 
@@ -1616,7 +1616,7 @@ When the metadata you want to propagate is more than a couple of keys, use an ex
 
 **Verification grep:** `grep -rn "Logger.metadata\|Task\." lib/` should show that every `Task.async` / `Task.Supervisor.start_child` call is preceded (in the same function or an enclosing wrapper) by a `Logger.metadata()` capture, OR receives a context struct as an argument.
 
-### 5.13 Secret-bearing struct — opaque inspect by default (Pass 5)
+### 5.13 Secret-bearing struct — opaque inspect by default
 
 Every struct that carries a secret-bearing field declares a safe `Inspect` rendering at definition time. **No struct ships without it.** Crash dumps include process state in SASL reports, observer, and remote shells; without an Inspect override every field is printed verbatim, including secrets that may end up in monitoring systems and incident channels.
 
@@ -1655,7 +1655,7 @@ end
 
 `:token`, `:auth_token`, `:access_token`, `:refresh_token`, `:session_token`, `:reset_token`, `:bearer_token`, `:csrf_token`, `:id_token`, `:secret`, `:client_secret`, `:secret_key`, `:secret_key_base`, `:api_key`, `:api_secret`, `:private_key`, `:signing_key`, `:encryption_key`, `:password`, `:password_hash`, `:password_digest`, `:hashed_password`, `:encrypted_password`, `:otp_secret`, `:totp_secret`.
 
-### 5.14 Sanitized errors at the response boundary (Pass 5)
+### 5.14 Sanitized errors at the response boundary
 
 Drain stacktraces into `Logger` / `:telemetry.execute`; return a bounded error code; never put `__STACKTRACE__` in a response body.
 
@@ -1709,7 +1709,7 @@ end
 
 The boundary calls only `MyApp.Errors.to_response/1`, never reaches for `__STACKTRACE__` directly.
 
-### 5.15 Versioned event/command struct (Pass 10)
+### 5.15 Versioned event/command struct
 
 Two conventions for evolving persisted/exchanged event payloads. Pick ONE per project and document it in the planning gate (§0.1).
 
@@ -1827,7 +1827,7 @@ end
 
 Targeted at the specific mistakes that appear in LLM-generated Elixir. Each pair is a pattern Claude is prone to emit; the GOOD side is what idiomatic code looks like.
 
-### 7.1 Control flow (Pass 14B nested case, 14C pattern-match in heads)
+### 7.1 Control flow
 
 ```elixir
 # BAD — if/else chain dispatching on data shape
@@ -1919,7 +1919,7 @@ cond do
 end
 ```
 
-### 7.2 Pipelines (Pass 14 idiomatic / readability)
+### 7.2 Pipelines
 
 ```elixir
 # BAD — single-step pipe
@@ -1964,7 +1964,7 @@ data |> (fn x -> x * 2 end).()
 data |> then(&(&1 * 2))
 ```
 
-### 7.3 Enum / iteration (Pass 14 idiomatic / performance)
+### 7.3 Enum / iteration
 
 ```elixir
 # BAD — Enum.each to accumulate (rebinding doesn't escape the closure!)
@@ -2027,7 +2027,7 @@ Enum.reduce(pairs, %{}, fn {k, v}, acc -> Map.put(acc, k, v * 2) end)
 Map.new(pairs, fn {k, v} -> {k, v * 2} end)
 ```
 
-### 7.4 Error handling (Pass 5 sanitization, Pass 9 functional core)
+### 7.4 Error handling
 
 ```elixir
 # BAD — try/rescue for an expected failure
@@ -2101,7 +2101,7 @@ rescue
 end
 ```
 
-### 7.5 Data manipulation (Pass 14 idiomatic, Pass 5 secret-bearing struct updates)
+### 7.5 Data manipulation
 
 ```elixir
 # BAD — Map.put for a struct field (silently adds unknown keys with typos)
@@ -2141,7 +2141,7 @@ rows
 |> IO.iodata_to_binary()
 ```
 
-### 7.6 Pattern matching gotchas (Pass 14C)
+### 7.6 Pattern matching gotchas
 
 ```elixir
 # BAD — forgot the pin; variable rebinds and matches anything
@@ -2176,7 +2176,7 @@ params = %{"name" => "Jane"}
 %{name: n} = internal_map       # Internal data → atom keys
 ```
 
-### 7.7 Atoms and safety (Pass 3)
+### 7.7 Atoms and safety
 
 ```elixir
 # DANGEROUS — user input becomes permanent atoms (atom table exhaustion, ~1M limit)
@@ -2188,7 +2188,7 @@ String.to_existing_atom(user_input)
 Jason.decode!(json)             # Default keys: :strings
 ```
 
-### 7.8 Function and API design (Pass 4 ambient authority, Pass 12 packages)
+### 7.8 Function and API design
 
 ```elixir
 # BAD — boolean parameters obscure intent at call sites
@@ -2223,7 +2223,7 @@ defmodule MyLib.Client do
 end
 ```
 
-### 7.9 Process / OTP (Pass 7 lifecycle, Pass 8 mailbox/backpressure, Pass 9 functional core)
+### 7.9 Process / OTP
 
 ```elixir
 # BAD — spawn for long-running work (unsupervised)
@@ -2283,7 +2283,7 @@ def init(_) do
 end
 ```
 
-### 7.10 Tests (cross-cutting; not a single cleanup-guide pass)
+### 7.10 Tests
 
 ```elixir
 # BAD — asserting on inspect output (no structural diff, brittle)
@@ -2327,7 +2327,7 @@ stub(MyApp.Mailer.Mock, :send_welcome, fn _ -> :ok end)
 expect(MyApp.Mailer.Mock, :send_welcome, fn _ -> :ok end)
 ```
 
-### 7.11 Unsafe deserialization and runtime eval (Pass 6)
+### 7.11 Unsafe deserialization and runtime eval
 
 ```elixir
 # BAD — bare :erlang.binary_to_term on attacker-shaped bytes is RCE
@@ -2377,7 +2377,7 @@ def call(conn, {mod, fun, args}) do
 end
 ```
 
-### 7.12 Async drops Logger.metadata (Pass 13)
+### 7.12 Async drops Logger.metadata
 
 ```elixir
 # BAD — async closure logs without restoring metadata
@@ -2454,7 +2454,7 @@ defmodule MyApp.Workers.Sync do
 end
 ```
 
-### 7.13 Secret leak via Inspect / stacktrace / IO.inspect (Pass 5)
+### 7.13 Secret leak via Inspect / stacktrace / IO.inspect
 
 ```elixir
 # BAD — defstruct with token field, no Inspect derive — leaks via crash dumps
@@ -2511,7 +2511,7 @@ end
 # pattern is genuinely absent from production code.
 ```
 
-### 7.14 Unversioned event/command payload (Pass 10)
+### 7.14 Unversioned event/command payload
 
 ```elixir
 # BAD — unversioned event; adding a field breaks the event store
