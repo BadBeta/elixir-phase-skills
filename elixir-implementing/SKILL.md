@@ -185,6 +185,9 @@ Tests-after is correct for a **very narrow** set: HEEx/EEx templates, CSS/stylin
 25. **NEVER call `Code.eval_string/1,2`, `Code.eval_quoted/1,2,3`, or `Code.compile_string/1,2` on runtime data.** These are build-time primitives (Mix tasks, code generators). On runtime input they are unconditionally RCE — there is no `:safe` form. Replace with a bounded command/plugin registry: a compile-time `@commands %{name => &Mod.fun/n}` map and `Map.fetch(@commands, name)` for dispatch. See §5.10. Phoenix, Plug, Plug.Crypto, Ecto, and Bandit do not call `Code.eval_*` from `lib/`; if the rule fires on a candidate edit, the edit is wrong.
 26. **NEVER call `apply(mod, fun, args)` where `mod` or `fun` can be reached by external input.** A variable module/function in `apply` whose value flows from `conn.params`, a channel message, an Oban job arg, or a GenServer message payload is a confused-deputy RCE primitive. Plug uses `apply(mod, fun, args)` extensively (`Plug.Parsers.JSON`, `Plug.RewriteOn`, `Plug.SSL`) — but mod/fun in those calls come from `init/1`-validated config tuples (`{module, function, args}`), never from request data. The rule is about taint: if the variable's source is config or a compile-time map, fine; if it can be reached by request input, replace with a bounded registry (§5.10).
 27. **ALWAYS propagate `Logger.metadata` across async boundaries.** `Logger.metadata` is documented as **process-local** (see Logger module docs): a process spawned via `Task.async`, `Task.Supervisor.start_child`, `Task.async_stream`, or `spawn_link` starts with empty metadata. Any log line or `:telemetry.execute/3` call from that process is missing the parent's `request_id`, `trace_id`, and `tenant_id` — the line becomes orphan in log search. Capture metadata before the async call, restore it inside the closure (see §5.12). For request-scope metadata setup, `Plug.RequestId` is the reference setter (`Logger.metadata([{logger_metadata_key, request_id}])`).
+28. **ALWAYS attach a safe `Inspect` rendering to every struct that carries a secret field.** Either `@derive {Inspect, only: [...]}` (listing the safe fields) before `defstruct`, OR `defimpl Inspect, for: __MODULE__` for full custom rendering. Without an override, crash dumps include process state in SASL reports, observer, and remote shells — every secret field is printed verbatim. The reference is `Plug.Conn`'s `defimpl Inspect` (`lib/plug/conn.ex`), which replaces `:secret_key_base` with `:...` before `Inspect.Any.inspect/2`. See §5.13.
+29. **NEVER include `__STACKTRACE__` in a value that crosses a response boundary** (Phoenix conn render, channel reply, GraphQL resolver result, JSON view, LiveView flash). Stacktraces leak the internal module structure of the application — private modules, line numbers, library versions, call paths. They are a roadmap for an attacker. Drain them via `Logger.error(Exception.format(:error, e, __STACKTRACE__))` or `:telemetry.execute/3` metadata; return a sanitized error tuple (`{:error, :payment_failed}`) which the boundary maps to a bounded response shape (`%{code: "payment_failed"}`). Reference: `Phoenix.Endpoint.RenderErrors.__catch__/5` captures `stack = __STACKTRACE__` and passes it to `instrument_render_and_send` (Logger / telemetry) — never to the response body. See §5.14.
+30. **NEVER leave `IO.inspect/1,2` or `dbg/0,1` in `lib/`.** Production lib code does not debug-print to stdout. Phoenix, Bandit, Plug.Crypto, and Guardian all have ZERO `IO.inspect` calls in their published `lib/`. The only legitimate lib-side appearances are: a deliberate public API that exposes `IO.inspect`-shape behaviour to users (e.g. `Ecto.Multi.inspect/3` is intentional), or `# IO.inspect ...` shapes inside doc comments. If you reach for `IO.inspect` while writing production code, you wanted `Logger.debug/info/warning` with structured metadata.
 
 ---
 
@@ -1609,6 +1612,99 @@ When the metadata you want to propagate is more than a couple of keys, use an ex
 
 **Verification grep:** `grep -rn "Logger.metadata\|Task\." lib/` should show that every `Task.async` / `Task.Supervisor.start_child` call is preceded (in the same function or an enclosing wrapper) by a `Logger.metadata()` capture, OR receives a context struct as an argument.
 
+### 5.13 Secret-bearing struct — opaque inspect by default (Pass 5)
+
+Every struct that carries a secret-bearing field declares a safe `Inspect` rendering at definition time. **No struct ships without it.** Crash dumps include process state in SASL reports, observer, and remote shells; without an Inspect override every field is printed verbatim, including secrets that may end up in monitoring systems and incident channels.
+
+Two patterns, pick one per struct:
+
+```elixir
+# Pattern A — @derive {Inspect, only: [...]}: list the SAFE fields
+defmodule MyApp.Session do
+  @derive {Inspect, only: [:id, :user_id, :inserted_at]}
+  @derive {Jason.Encoder, only: [:id, :user_id, :inserted_at]}
+  @enforce_keys [:id, :user_id, :token]
+  defstruct [:id, :user_id, :token, :inserted_at]
+end
+# Inspect output: #MyApp.Session<id: ..., user_id: ..., inserted_at: ...>
+# (the :token never appears)
+
+# Pattern B — defimpl Inspect, for: __MODULE__: full custom rendering
+# (the Plug.Conn pattern)
+defmodule MyApp.CredentialHandle do
+  @enforce_keys [:id, :provider]
+  defstruct [:id, :provider, :expires_at, :materialized_secret]
+
+  defimpl Inspect do
+    def inspect(%{id: id, provider: p, expires_at: ea}, _opts) do
+      "#Credential<provider=#{p} id=#{id} expires_at=#{inspect(ea)}>"
+    end
+  end
+end
+```
+
+`@derive` MUST come BEFORE `defstruct`, or it does not apply.
+
+**Reference**: `Plug.Conn` uses `defimpl Inspect, for: Plug.Conn` to replace `:secret_key_base` with `:...` before delegating to `Inspect.Any.inspect/2` (see `lib/plug/conn.ex` `defimpl Inspect` block). `Ecto.Changeset`, `Ecto.Query`, `Ecto.Schema.Metadata`, and `Ecto.Association` all use the same `defimpl Inspect` shape — sometimes for secrets, more often for clean rendering of a complex internal struct.
+
+**Sensitive-field allowlist** (close enough for "must have Inspect override" detection):
+
+`:token`, `:auth_token`, `:access_token`, `:refresh_token`, `:session_token`, `:reset_token`, `:bearer_token`, `:csrf_token`, `:id_token`, `:secret`, `:client_secret`, `:secret_key`, `:secret_key_base`, `:api_key`, `:api_secret`, `:private_key`, `:signing_key`, `:encryption_key`, `:password`, `:password_hash`, `:password_digest`, `:hashed_password`, `:encrypted_password`, `:otp_secret`, `:totp_secret`.
+
+### 5.14 Sanitized errors at the response boundary (Pass 5)
+
+Drain stacktraces into `Logger` / `:telemetry.execute`; return a bounded error code; never put `__STACKTRACE__` in a response body.
+
+```elixir
+defmodule MyAppWeb.OrderController do
+  use Phoenix.Controller
+  require Logger
+
+  def show(conn, params) do
+    do_show(conn, params)
+  rescue
+    e ->
+      # Drain to Logger — operators see it, callers don't
+      Logger.error(Exception.format(:error, e, __STACKTRACE__),
+        order_id: params["id"],
+        path: conn.request_path
+      )
+
+      # Return a bounded code; never the stacktrace
+      conn
+      |> put_status(500)
+      |> json(%{error: %{code: "internal_error", message: "An error occurred"}})
+  end
+end
+```
+
+**Reference**: `Phoenix.Endpoint.RenderErrors.__catch__/5` (`lib/phoenix/endpoint/render_errors.ex`) captures the stack into a local var and routes it to `instrument_render_and_send` for Logger / telemetry — Phoenix's render path **never** puts `__STACKTRACE__` in the rendered body. That's the production discipline this section codifies.
+
+For domain errors, route through one mapping module:
+
+```elixir
+defmodule MyApp.Errors do
+  @moduledoc "One mapping table from internal reason → external response."
+
+  @mappings %{
+    payment_failed:     {402, %{code: "payment_failed",     message: "Payment was declined"}},
+    insufficient_stock: {409, %{code: "out_of_stock",       message: "Item is out of stock"}},
+    not_found:          {404, %{code: "not_found",          message: "Not found"}}
+  }
+
+  @spec to_response(atom()) :: {pos_integer(), map()}
+  def to_response(reason) do
+    Map.get(
+      @mappings,
+      reason,
+      {500, %{code: "internal_error", message: "An error occurred"}}
+    )
+  end
+end
+```
+
+The boundary calls only `MyApp.Errors.to_response/1`, never reaches for `__STACKTRACE__` directly.
+
 ---
 
 ## 6. Idiomatic Elixir Constructs
@@ -2295,6 +2391,63 @@ defmodule MyApp.Workers.Sync do
     do_sync(id)
   end
 end
+```
+
+### 7.13 Secret leak via Inspect / stacktrace / IO.inspect (Pass 5)
+
+```elixir
+# BAD — defstruct with token field, no Inspect derive — leaks via crash dumps
+defmodule MyApp.Session do
+  defstruct [:id, :user_id, :token, :expires_at]
+end
+# Process crash → SASL report logs %Session{token: "abc123def..."}.
+# Same problem if anyone IO.inspects the struct in observer or a remote shell.
+
+# GOOD — @derive Inspect with explicit safe fields
+defmodule MyApp.Session do
+  @derive {Inspect, only: [:id, :user_id, :expires_at]}
+  defstruct [:id, :user_id, :token, :expires_at]
+end
+```
+
+```elixir
+# BAD — stacktrace returned in JSON response — leaks internal topology
+def show(conn, params) do
+  do_show(conn, params)
+rescue
+  e ->
+    json(conn, %{error: Exception.format(:error, e, __STACKTRACE__)})
+end
+
+# GOOD — log internally, return sanitized
+def show(conn, params) do
+  do_show(conn, params)
+rescue
+  e ->
+    Logger.error(Exception.format(:error, e, __STACKTRACE__))
+    conn
+    |> put_status(500)
+    |> json(%{error: %{code: "internal_error"}})
+end
+```
+
+```elixir
+# BAD — IO.inspect in lib/ — bypasses Logger, leaks raw struct, usually
+# left over from a debugging session
+def calculate(order) do
+  IO.inspect(order, label: "order")
+  do_calculate(order)
+end
+
+# GOOD — structured Logger
+def calculate(order) do
+  Logger.debug("calculating", order_id: order.id)
+  do_calculate(order)
+end
+
+# Production lib reference: Phoenix, Bandit, Plug.Crypto, Guardian have
+# ZERO IO.inspect calls in their lib/ trees. The "left over from debugging"
+# pattern is genuinely absent from production code.
 ```
 
 ---
