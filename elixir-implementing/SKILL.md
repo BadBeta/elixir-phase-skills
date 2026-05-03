@@ -181,6 +181,9 @@ Tests-after is correct for a **very narrow** set: HEEx/EEx templates, CSS/stylin
 21. **ALWAYS use the latest stable dependency versions** and follow the library's recommended `mix.exs` setup. Don't hand-craft configurations that would break the standard installation flow.
 22. **ALWAYS run `mix format`, `mix credo --strict`, and the test suite** before declaring a change done. Fix warnings; do not suppress them.
 23. **ALWAYS check the SSOT source before introducing a new magic literal.** Before you type `@timeout 5_000` in a module, or `%{role: "admin"}` in a changeset, or `Map.get(opts, :timeout, 30_000)` in a helper, grep the project for `config/config.exs` / `config/runtime.exs` / `lib/MY_APP/constants.ex` / any `MyApp.Config`-style module — if a name for this value already exists there, use it. If one doesn't but this value encodes a deliberate policy (timeout, retry count, role name, allowed set), add it THERE first and reference from here. Literals inline in business logic drift — the reviewing skill's SSOT litmus (*"if this fact changes, how many files do I have to update?"*) should answer 1, not N. Common Elixir SSOT homes: `config/*.exs` (for values that may change per environment), a dedicated `MyApp.Config` module (for values read on the hot path — see §10.5.1 `elixir-planning`), module `@attributes` (for values that are compile-time constants of a single module). The anti-slop `elixir-magic-literal-outside-config` check fires post-write as a backstop; this rule is the proactive version.
+24. **NEVER deserialize untrusted input via bare `:erlang.binary_to_term/1,2`.** ETF can instantiate any term — atoms, funs, pids — so on attacker-controlled bytes it is RCE-equivalent. Use `Plug.Crypto.non_executable_binary_to_term/2` (rejects funs/pids/refs at decode time) and pass `[:safe]` when atoms must already exist. For external payloads (HTTP body, message broker, file upload), prefer JSON + a typed DTO via `MyDTO.new/1` — see §5.11. Plug's session cookie store and Phoenix.Token both use the `non_executable_binary_to_term/2` wrapper; bare `:erlang.binary_to_term/1` does not appear in any production module of Plug or Phoenix.
+25. **NEVER call `Code.eval_string/1,2`, `Code.eval_quoted/1,2,3`, or `Code.compile_string/1,2` on runtime data.** These are build-time primitives (Mix tasks, code generators). On runtime input they are unconditionally RCE — there is no `:safe` form. Replace with a bounded command/plugin registry: a compile-time `@commands %{name => &Mod.fun/n}` map and `Map.fetch(@commands, name)` for dispatch. See §5.10. Phoenix, Plug, Plug.Crypto, Ecto, and Bandit do not call `Code.eval_*` from `lib/`; if the rule fires on a candidate edit, the edit is wrong.
+26. **NEVER call `apply(mod, fun, args)` where `mod` or `fun` can be reached by external input.** A variable module/function in `apply` whose value flows from `conn.params`, a channel message, an Oban job arg, or a GenServer message payload is a confused-deputy RCE primitive. Plug uses `apply(mod, fun, args)` extensively (`Plug.Parsers.JSON`, `Plug.RewriteOn`, `Plug.SSL`) — but mod/fun in those calls come from `init/1`-validated config tuples (`{module, function, args}`), never from request data. The rule is about taint: if the variable's source is config or a compile-time map, fine; if it can be reached by request input, replace with a bounded registry (§5.10).
 
 ---
 
@@ -263,6 +266,10 @@ This is the single most important section to consult at the moment of writing. E
 | Offer both strict and lenient API | Pair: `fetch/1` (ok/error) + `fetch!/1` (raises) | Only bang, or only non-bang |
 | Wrap an external library that raises | `try/rescue` at the adapter boundary, convert to ok/error | Let exceptions leak out of your context |
 | Propagate unknown errors | Let them crash; supervisor restarts | Catch-all `rescue _` |
+| Decode an ETF (`:erlang.term_to_binary`) payload from another node or signed cookie | `Plug.Crypto.non_executable_binary_to_term(payload, [:safe])` | Bare `:erlang.binary_to_term/1` (RCE class on attacker bytes) |
+| Decode a payload from outside the cluster (HTTP body, broker, upload) | JSON / Protobuf / explicit format + `MyDTO.new/1` (see §5.11) | Any form of `:erlang.binary_to_term` |
+| Dispatch on a string command from external input | `Map.fetch(@commands, name)` against a compile-time registry (see §5.10) | `apply(String.to_existing_atom(name), :run, args)` / `Code.eval_*` |
+| Need to invoke a function whose name is config-supplied | `apply(mod, fun, args)` is fine when `mod`/`fun` came from `init/1`-validated config (Plug pattern) | Same `apply` shape with `mod`/`fun` reaching from request params or channel messages |
 
 ### 2.5 Strings and binaries
 
@@ -1468,6 +1475,82 @@ Then make every `handle_info` that can change the row's appearance call `stream_
 
 This is one of the highest-impact LV gotchas — it often drives architectural rework (virtual field on the schema, `list_with_state/1` context function with `DISTINCT ON`, etc.). Design for it at planning time; don't discover it in a test failure.
 
+### 5.10 Bounded command/plugin registry — the safe replacement for runtime eval and dispatch
+
+When external input picks the operation to run, the registry IS the security boundary. Unknown names return `{:error, :unknown_command}` instead of executing arbitrary code. This pattern replaces every `Code.eval_*` and every `apply` with a tainted module/function name (rule §1 #25/#26).
+
+```elixir
+defmodule MyApp.Commands do
+  @moduledoc "Bounded dispatcher. The @commands map IS the security boundary."
+
+  @commands %{
+    "list_users"   => &MyApp.Accounts.list_users/0,
+    "lock_user"    => &MyApp.Accounts.lock_user/1,
+    "unlock_user"  => &MyApp.Accounts.unlock_user/1,
+    "audit_export" => &MyApp.Audit.export/1
+  }
+
+  @spec dispatch(String.t(), [term()]) :: {:ok, term()} | {:error, :unknown_command}
+  def dispatch(name, args) when is_binary(name) and is_list(args) do
+    case Map.fetch(@commands, name) do
+      {:ok, fun} -> {:ok, apply(fun, args)}
+      :error     -> {:error, :unknown_command}
+    end
+  end
+end
+```
+
+**Why this shape:** the `@commands` map is compile-time. A new command requires a code change + review + deploy — there is no runtime path that adds entries. `apply/2` on a function capture is fine here because the capture itself is a compile-time literal in the map. Compare:
+
+| | Compile-time registry (this) | `Code.eval_string` | `apply(String.to_atom(name), ...)` |
+|---|---|---|---|
+| Auditable list of operations | yes — read `@commands` | no — anything | no — any module/function |
+| Adds new behaviour at runtime | no (code-change only) | yes | yes |
+| Survives a malicious input | yes — `:error` | RCE | RCE |
+
+**Reference**: this is the shape Phoenix routers compile to (the `match` macros build a compile-time dispatch table) and how Oban resolves a `worker` argument to a module (workers are configured at compile time per queue, never named by the job payload).
+
+### 5.11 Safe ETF deserialization — when ETF is unavoidable
+
+**For external payloads, prefer JSON.** ETF should appear only on intra-cluster channels (signed cookies, `:gen_tcp` between known nodes, etc.) — and even there, route through `Plug.Crypto.non_executable_binary_to_term/2`, which forbids funs / pids / refs at decode time:
+
+```elixir
+# Cookie / signed-token style — Plug.Crypto.MessageVerifier already does this.
+# Use the helper directly when wrapping your own intra-cluster bytes.
+def decode_session(blob) when is_binary(blob) do
+  Plug.Crypto.non_executable_binary_to_term(blob, [:safe])
+rescue
+  ArgumentError -> {:error, :decode_failed}
+end
+```
+
+The `[:safe]` option additionally blocks the creation of new atoms — required when the payload may contain attacker-influenced atom-like strings.
+
+**For external payloads, the canonical shape is JSON + a typed DTO:**
+
+```elixir
+defmodule MyApp.OrderRequest do
+  @moduledoc "Public DTO for external order requests. Owned at the boundary."
+
+  @enforce_keys [:user_id, :items]
+  defstruct [:user_id, :items, opts: %{}]
+
+  @type t :: %__MODULE__{user_id: pos_integer(), items: [map()], opts: map()}
+
+  @spec new(binary()) :: {:ok, t()} | {:error, term()}
+  def new(json) when is_binary(json) do
+    with {:ok, %{"user_id" => uid, "items" => items} = raw} <- Jason.decode(json),
+         {:ok, items}                                      <- normalize_items(items) do
+      {:ok, %__MODULE__{user_id: uid, items: items, opts: Map.get(raw, "opts", %{})}}
+    end
+  end
+
+  def new(_), do: {:error, :invalid_request}
+end
+```
+
+The `Plug.Session.Cookie` store and `Phoenix.Token` are the production references for the ETF path; `Plug.Parsers.JSON` is the reference for the JSON-DTO path.
+
 ---
 
 ## 6. Idiomatic Elixir Constructs
@@ -2027,6 +2110,56 @@ stub(MyApp.Mailer.Mock, :send_welcome, fn _ -> :ok end)
 
 # GOOD — expect, which verifies the call happened
 expect(MyApp.Mailer.Mock, :send_welcome, fn _ -> :ok end)
+```
+
+### 7.11 Unsafe deserialization and runtime eval (Pass 6)
+
+```elixir
+# BAD — bare :erlang.binary_to_term on attacker-shaped bytes is RCE
+def decode_payload(blob), do: :erlang.binary_to_term(blob)
+
+# GOOD — Plug.Crypto.non_executable_binary_to_term rejects funs/pids/refs;
+# `[:safe]` additionally blocks creation of new atoms.
+def decode_payload(blob) when is_binary(blob) do
+  Plug.Crypto.non_executable_binary_to_term(blob, [:safe])
+rescue
+  ArgumentError -> {:error, :decode_failed}
+end
+```
+
+```elixir
+# BAD — Code.eval_string on runtime input is unconditionally RCE
+def run_user_macro(src), do: Code.eval_string(src)
+
+# GOOD — bounded command registry; Map.fetch IS the security boundary
+@commands %{"list" => &Accounts.list/0, "lock" => &Accounts.lock/1}
+def run(name, args) when is_binary(name) and is_list(args) do
+  case Map.fetch(@commands, name) do
+    {:ok, fun} -> {:ok, apply(fun, args)}
+    :error     -> {:error, :unknown_command}
+  end
+end
+```
+
+```elixir
+# BAD — apply with module/function reaching from request input
+def call(conn) do
+  mod = String.to_existing_atom(conn.params["module"])
+  fun = String.to_existing_atom(conn.params["function"])
+  apply(mod, fun, [conn])
+end
+
+# GOOD — `apply` is fine when mod/fun came from init/1-validated config.
+# The `Plug.Parsers.JSON` shape: validate the shape at init/1, dispatch at call/2.
+def init(opts) do
+  decoder = Keyword.get(opts, :decoder, Jason)
+  validate_decoder!(decoder)   # raises at compile-time-config validation
+  {decoder, :decode!, []}
+end
+
+def call(conn, {mod, fun, args}) do
+  apply(mod, fun, [conn | args])
+end
 ```
 
 ---

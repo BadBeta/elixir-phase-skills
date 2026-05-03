@@ -99,6 +99,7 @@ Every item below has a concrete answer before any implementation begins. If any 
 - [ ] Every external dependency behind a `@callback` behaviour with the exact callback names and signatures listed (§4.4). No "we'll introduce the behaviour later."
 - [ ] Config keys named for each adapter swap (test/stub vs prod) — including the exact `config :my_app, MyBoundary, ...` line.
 - [ ] Every external call's failure mode classified: retry / circuit break / degrade / propagate (§11.2–11.4).
+- [ ] **Every external payload format is named** (JSON / Protobuf / Avro / line-delimited / fixed binary). ETF (`:erlang.binary_to_term`) is reserved for trusted intra-cluster traffic AND only routed through `Plug.Crypto.non_executable_binary_to_term/2` (or equivalent — never bare `:erlang.binary_to_term/1`). No boundary uses `Code.eval_string`/`eval_quoted`/`compile_string` on runtime data; runtime dispatch from external input goes through a compile-time `@commands`-style registry (see `elixir-implementing` §5.10–5.11).
 
 **Configuration**
 - [ ] Every config value classified as compile-time vs runtime (§3.10, §10.2).
