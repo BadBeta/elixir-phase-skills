@@ -188,6 +188,7 @@ Tests-after is correct for a **very narrow** set: HEEx/EEx templates, CSS/stylin
 28. **ALWAYS attach a safe `Inspect` rendering to every struct that carries a secret field.** Either `@derive {Inspect, only: [...]}` (listing the safe fields) before `defstruct`, OR `defimpl Inspect, for: __MODULE__` for full custom rendering. Without an override, crash dumps include process state in SASL reports, observer, and remote shells — every secret field is printed verbatim. The reference is `Plug.Conn`'s `defimpl Inspect` (`lib/plug/conn.ex`), which replaces `:secret_key_base` with `:...` before `Inspect.Any.inspect/2`. See §5.13.
 29. **NEVER include `__STACKTRACE__` in a value that crosses a response boundary** (Phoenix conn render, channel reply, GraphQL resolver result, JSON view, LiveView flash). Stacktraces leak the internal module structure of the application — private modules, line numbers, library versions, call paths. They are a roadmap for an attacker. Drain them via `Logger.error(Exception.format(:error, e, __STACKTRACE__))` or `:telemetry.execute/3` metadata; return a sanitized error tuple (`{:error, :payment_failed}`) which the boundary maps to a bounded response shape (`%{code: "payment_failed"}`). Reference: `Phoenix.Endpoint.RenderErrors.__catch__/5` captures `stack = __STACKTRACE__` and passes it to `instrument_render_and_send` (Logger / telemetry) — never to the response body. See §5.14.
 30. **NEVER leave `IO.inspect/1,2` or `dbg/0,1` in `lib/`.** Production lib code does not debug-print to stdout. Phoenix, Bandit, Plug.Crypto, and Guardian all have ZERO `IO.inspect` calls in their published `lib/`. The only legitimate lib-side appearances are: a deliberate public API that exposes `IO.inspect`-shape behaviour to users (e.g. `Ecto.Multi.inspect/3` is intentional), or `# IO.inspect ...` shapes inside doc comments. If you reach for `IO.inspect` while writing production code, you wanted `Logger.debug/info/warning` with structured metadata.
+31. **ALWAYS plan for event/command schema evolution from day one.** Once an event or command is persisted (event store) or exchanged across a versioned wire (Oban args, broker payloads), adding a field or renaming one is a breaking change against existing data. Pick ONE convention per project, write it down at planning time: (a) inline `:version` field on every event struct, OR (b) `defimpl Commanded.Event.Upcaster, for: MyEvent` that transforms older persisted shapes into the current shape in place. The Commanded-shape uses **one event module per type** (NOT separate `V1.OrderPlaced` / `V2.OrderPlaced` modules) — the upcaster fills in defaults for missing fields when an older event is read. See §5.15.
 
 ---
 
@@ -1705,6 +1706,63 @@ end
 
 The boundary calls only `MyApp.Errors.to_response/1`, never reaches for `__STACKTRACE__` directly.
 
+### 5.15 Versioned event/command struct (Pass 10)
+
+Two conventions for evolving persisted/exchanged event payloads. Pick ONE per project and document it in the planning gate (§0.1).
+
+**Convention A — inline `:version` field on the struct.** Simple projects, no event-store library, easy to reason about:
+
+```elixir
+defmodule MyApp.Events.OrderPlaced do
+  @version 1
+  @derive {Jason.Encoder, only: [:version, :order_id, :placed_at]}
+  @enforce_keys [:order_id, :placed_at]
+  defstruct version: @version, order_id: nil, placed_at: nil
+
+  @type t :: %__MODULE__{version: pos_integer(), order_id: binary(), placed_at: DateTime.t()}
+end
+```
+
+When the schema evolves, bump `@version` and add the new field with a default; an explicit upcaster module reads the old version and translates:
+
+```elixir
+defmodule MyApp.Events.OrderPlacedUpcaster do
+  def upcast(%{"version" => 1, "order_id" => oid, "placed_at" => pa}) do
+    %{"version" => 2, "order_id" => oid, "placed_at" => pa, "placed_by" => nil}
+  end
+  def upcast(%{"version" => 2} = event), do: event
+end
+```
+
+**Convention B — `defimpl Commanded.Event.Upcaster, for: MyEvent`** (the Commanded idiom). **One event module per type**; the upcaster transforms older persisted shapes into the current shape *in place*. Note: Commanded does NOT recommend `V1.OrderPlaced` / `V2.OrderPlaced` separate modules. The struct evolves; the upcaster fills in defaults for fields the older version didn't have.
+
+Documented Commanded example (rename `:name` → `:first_name`):
+
+```elixir
+defmodule AnEvent do
+  defstruct [:first_name]
+end
+
+defimpl Commanded.Event.Upcaster, for: AnEvent do
+  def upcast(%AnEvent{} = event, _metadata) do
+    %AnEvent{name: name} = event       # old persisted shape had :name
+    %AnEvent{event | first_name: name} # current shape has :first_name
+  end
+end
+```
+
+> "Upcaster changes any historical event to the latest version, consumers (aggregates, event handlers, and process managers) only need to support the latest version."
+> — `Commanded.Event.Upcaster` moduledoc
+
+**Decision: A vs B**
+
+| Choice | Use when |
+|---|---|
+| Inline `:version` field (Convention A) | No event-store library; events flow through Oban/PubSub; project owns the storage shape |
+| `defimpl Commanded.Event.Upcaster` (Convention B) | Project uses Commanded / EventStore; one event module per type; upcaster handles back-compat |
+
+Mixing the two is acceptable but the project must declare which is the default for new events.
+
 ---
 
 ## 6. Idiomatic Elixir Constructs
@@ -2448,6 +2506,52 @@ end
 # Production lib reference: Phoenix, Bandit, Plug.Crypto, Guardian have
 # ZERO IO.inspect calls in their lib/ trees. The "left over from debugging"
 # pattern is genuinely absent from production code.
+```
+
+### 7.14 Unversioned event/command payload (Pass 10)
+
+```elixir
+# BAD — unversioned event; adding a field breaks the event store
+# (existing persisted events lack the field; consumers crash on read)
+defmodule MyApp.Events.OrderPlaced do
+  defstruct [:order_id, :placed_at]
+end
+
+# GOOD A — inline :version field
+defmodule MyApp.Events.OrderPlaced do
+  @version 1
+  defstruct version: @version, order_id: nil, placed_at: nil
+end
+
+# GOOD B — Commanded idiom: one module, defimpl Upcaster for back-compat
+defmodule MyApp.Events.OrderPlaced do
+  defstruct [:order_id, :placed_at, :placed_by]   # current shape
+end
+
+defimpl Commanded.Event.Upcaster, for: MyApp.Events.OrderPlaced do
+  def upcast(%MyApp.Events.OrderPlaced{placed_by: nil} = event, _metadata) do
+    # Older persisted events didn't have :placed_by — fill the default.
+    %MyApp.Events.OrderPlaced{event | placed_by: :unknown}
+  end
+  def upcast(event, _metadata), do: event
+end
+```
+
+```elixir
+# BAD — separate V1/V2 modules + upcaster between them.
+# This is sometimes proposed but Commanded does NOT recommend it; the
+# canonical shape is one module that evolves, with defimpl Upcaster.
+defmodule MyApp.Events.V1.OrderPlaced do
+  defstruct [:order_id, :placed_at]
+end
+defmodule MyApp.Events.V2.OrderPlaced do
+  defstruct [:order_id, :placed_at, :placed_by]
+end
+
+# GOOD — one module per event TYPE; Upcaster handles version differences
+defmodule MyApp.Events.OrderPlaced do
+  defstruct [:order_id, :placed_at, :placed_by]
+end
 ```
 
 ---
