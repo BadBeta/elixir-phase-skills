@@ -100,6 +100,7 @@ Every item below has a concrete answer before any implementation begins. If any 
 - [ ] Config keys named for each adapter swap (test/stub vs prod) — including the exact `config :my_app, MyBoundary, ...` line.
 - [ ] Every external call's failure mode classified: retry / circuit break / degrade / propagate (§11.2–11.4).
 - [ ] **Every external payload format is named** (JSON / Protobuf / Avro / line-delimited / fixed binary). ETF (`:erlang.binary_to_term`) is reserved for trusted intra-cluster traffic AND only routed through `Plug.Crypto.non_executable_binary_to_term/2` (or equivalent — never bare `:erlang.binary_to_term/1`). No boundary uses `Code.eval_string`/`eval_quoted`/`compile_string` on runtime data; runtime dispatch from external input goes through a compile-time `@commands`-style registry (see `elixir-implementing` §5.10–5.11).
+- [ ] **Logger.metadata propagation strategy named per async boundary.** Every Phoenix endpoint sets `Plug.RequestId` (or equivalent). Every Phoenix Channel `join/3` calls `Logger.metadata/1`. Every Oban worker's `perform/1` hydrates metadata from the job's `args`. Every `Task.async`/`Task.Supervisor.start_child` site captures parent metadata before the closure. Cross-node calls pass an explicit `TraceContext` struct. See §11.7 for the design table.
 
 **Configuration**
 - [ ] Every config value classified as compile-time vs runtime (§3.10, §10.2).
@@ -187,6 +188,7 @@ Before declaring planning done and loading `elixir-implementing`:
 20. **ALWAYS hand off to `elixir-implementing` for the actual code.** This skill decides *what to build*; the implementing skill covers *how to type it idiomatically*.
 21. **ALWAYS pass the plan-completeness gate (§0) before handing off.** A plan with TODOs, "TBD", "we'll pick later", or unresolved decisions is not a plan — it's a partial plan that will force decisions under pressure mid-implementation. Every checklist item in §0.1 must have a concrete noun answer (a name, a type, a signature, a number) before implementation begins. This rule has priority over all others: an incomplete plan poisons every downstream decision.
 22. **ALWAYS use battle-tested libraries for authentication, password hashing, session management, cryptography, JWTs, OAuth, secret comparison, and access tokens — NEVER hand-roll these.** Hand-rolling a security-critical primitive is an exception that requires explicit justification AND a security review; the default answer is "no." A "custom requirement" (non-standard `Authorization` scheme, custom claims shape, unusual session storage, exotic token format) is almost always a configuration parameter on a real library, NOT a reason to write your own. If you find yourself reaching for raw primitives (`Joken`, `:crypto`, hand-written plug pipelines, hand-rolled token format) ask: which library wraps these and exposes the customization I need? Almost always the answer exists. Canonical Elixir picks: `phx.gen.auth` (sessions+cookies for browser apps), Guardian (JWT for JSON APIs — `VerifyHeader`'s `scheme:` option handles non-standard headers), Ueberauth (OAuth), `bcrypt_elixir` / `argon2_elixir` (password hashing — lower rounds in `config/test.exs`, never via a behaviour-and-mock), `Plug.Crypto.secure_compare/2` (constant-time secret compare). The cost of using a library is one dep + one config block; the cost of hand-rolling is the bug you ship and don't notice.
+23. **ALWAYS design observability in from the start, with explicit Logger.metadata propagation across every async boundary.** `Logger.metadata` is per-process (documented Logger behaviour). A request's `request_id` / `trace_id` / `tenant_id` does NOT travel with `Task.async`, `Task.Supervisor.start_child`, `Oban.Job`, or `:erpc` calls. Pick the propagation strategy at planning time: capture-and-restore for single-hop async, an explicit `TraceContext` struct for multi-hop / cross-node. See §11.7 for the design table; every boundary in §0.1 implicitly requires its metadata-setter and metadata-propagation strategy named.
 
 ---
 
@@ -1951,6 +1953,70 @@ Phoenix endpoint   : timeout 15_000ms     (outermost)
 | Timeouts across layers | Outer > middle > inner cascade | Every layer |
 | Prevent one subsystem failing another | Separate processes / supervisors | Supervision tree |
 | Prevent retries from duplicating | Idempotency | Operation design |
+
+### 11.7 Observability & trace context
+
+`Logger.metadata` is **per-process** — documented behaviour of the `Logger` module. Any async boundary that doesn't propagate it is a runtime observability defect: log lines and telemetry events from spawned work appear without the originating request's `trace_id` / `request_id` / `tenant_id`. They become orphan when an operator searches by correlation ID.
+
+**Plan every async boundary's metadata strategy at design time:**
+
+| Request shape | Metadata setter |
+|---|---|
+| Phoenix HTTP request | `Plug.RequestId` configured early in the endpoint pipeline (sets `:request_id` in `Logger.metadata`). |
+| Phoenix Channel | A `set_metadata` plug or explicit `Logger.metadata/1` call in `join/3`. |
+| Oban job | Producer writes `trace_id` etc. into `Oban.Job.args`; the worker's `perform/1` calls `Logger.metadata/1` from those args (Oban's own job metadata — `:job_id`, `:worker`, `:queue`, `:attempt` — is set by the executor before `perform/1`). |
+| Bare `Task.async` / `Task.Supervisor.start_child` | Capture `Logger.metadata()` outside the closure, restore inside. |
+| Cross-node `:erpc` / GenServer `call` across nodes | Pass an explicit `TraceContext` struct as part of the message payload — `Logger.metadata` is local to the calling process; the remote process needs the value to set its own metadata. |
+
+**TraceContext template — explicit type for cross-node / cross-Oban / multi-hop scope:**
+
+```elixir
+defmodule MyApp.TraceContext do
+  @enforce_keys [:trace_id]
+  defstruct [:trace_id, :tenant_ref, :target_ref, :operation]
+
+  @type t :: %__MODULE__{
+    trace_id: String.t(),
+    tenant_ref: String.t() | nil,
+    target_ref: String.t() | nil,
+    operation: atom() | nil
+  }
+
+  @spec from_logger() :: t()
+  def from_logger do
+    md = Logger.metadata()
+    %__MODULE__{
+      trace_id: Keyword.get(md, :trace_id) || generate_trace_id(),
+      tenant_ref: Keyword.get(md, :tenant_ref),
+      target_ref: Keyword.get(md, :target_ref),
+      operation: Keyword.get(md, :operation)
+    }
+  end
+
+  @spec apply_to_logger(t()) :: :ok
+  def apply_to_logger(%__MODULE__{} = ctx) do
+    Logger.metadata(
+      trace_id: ctx.trace_id,
+      tenant_ref: ctx.tenant_ref,
+      target_ref: ctx.target_ref,
+      operation: ctx.operation
+    )
+  end
+
+  defp generate_trace_id, do: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+end
+```
+
+**Decision: `Logger.metadata` propagation vs explicit `TraceContext`:**
+
+| Choice | Use when |
+|---|---|
+| `Logger.metadata` capture+restore | Single async hop within one node; the metadata fits naturally in keyword form; you want backends/handlers to consume it without code changes. |
+| `TraceContext` struct | Cross-node / cross-Oban / multiple async hops; the trace fields outlive the log scope; you want a typed contract enforced by `@spec`. |
+
+**Telemetry rule:** every `:telemetry.execute/3` event that fires from an async closure must include `trace_id` (and any other relevant correlation IDs) in its **metadata** map — not rely on the receiving handler reading `Logger.metadata()`, because the handler runs in the *emitting* process, but a handler that re-publishes (e.g. to a remote sink) may not preserve metadata across that hop.
+
+**Reference**: `Plug.RequestId` (`Logger.metadata([{logger_metadata_key, request_id}])`) is the canonical metadata-setter side; the propagation pattern relies on Logger's documented per-process scope. See `elixir-implementing` §5.12 for the keyboard-time templates.
 
 ---
 

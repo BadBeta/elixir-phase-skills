@@ -184,6 +184,7 @@ Tests-after is correct for a **very narrow** set: HEEx/EEx templates, CSS/stylin
 24. **NEVER deserialize untrusted input via bare `:erlang.binary_to_term/1,2`.** ETF can instantiate any term — atoms, funs, pids — so on attacker-controlled bytes it is RCE-equivalent. Use `Plug.Crypto.non_executable_binary_to_term/2` (rejects funs/pids/refs at decode time) and pass `[:safe]` when atoms must already exist. For external payloads (HTTP body, message broker, file upload), prefer JSON + a typed DTO via `MyDTO.new/1` — see §5.11. Plug's session cookie store and Phoenix.Token both use the `non_executable_binary_to_term/2` wrapper; bare `:erlang.binary_to_term/1` does not appear in any production module of Plug or Phoenix.
 25. **NEVER call `Code.eval_string/1,2`, `Code.eval_quoted/1,2,3`, or `Code.compile_string/1,2` on runtime data.** These are build-time primitives (Mix tasks, code generators). On runtime input they are unconditionally RCE — there is no `:safe` form. Replace with a bounded command/plugin registry: a compile-time `@commands %{name => &Mod.fun/n}` map and `Map.fetch(@commands, name)` for dispatch. See §5.10. Phoenix, Plug, Plug.Crypto, Ecto, and Bandit do not call `Code.eval_*` from `lib/`; if the rule fires on a candidate edit, the edit is wrong.
 26. **NEVER call `apply(mod, fun, args)` where `mod` or `fun` can be reached by external input.** A variable module/function in `apply` whose value flows from `conn.params`, a channel message, an Oban job arg, or a GenServer message payload is a confused-deputy RCE primitive. Plug uses `apply(mod, fun, args)` extensively (`Plug.Parsers.JSON`, `Plug.RewriteOn`, `Plug.SSL`) — but mod/fun in those calls come from `init/1`-validated config tuples (`{module, function, args}`), never from request data. The rule is about taint: if the variable's source is config or a compile-time map, fine; if it can be reached by request input, replace with a bounded registry (§5.10).
+27. **ALWAYS propagate `Logger.metadata` across async boundaries.** `Logger.metadata` is documented as **process-local** (see Logger module docs): a process spawned via `Task.async`, `Task.Supervisor.start_child`, `Task.async_stream`, or `spawn_link` starts with empty metadata. Any log line or `:telemetry.execute/3` call from that process is missing the parent's `request_id`, `trace_id`, and `tenant_id` — the line becomes orphan in log search. Capture metadata before the async call, restore it inside the closure (see §5.12). For request-scope metadata setup, `Plug.RequestId` is the reference setter (`Logger.metadata([{logger_metadata_key, request_id}])`).
 
 ---
 
@@ -1551,6 +1552,63 @@ end
 
 The `Plug.Session.Cookie` store and `Phoenix.Token` are the production references for the ETF path; `Plug.Parsers.JSON` is the reference for the JSON-DTO path.
 
+### 5.12 Logger.metadata propagation across async boundaries (Pass 13)
+
+`Logger.metadata` is per-process. A task spawned from a request handler does **NOT** inherit the request's `trace_id` / `request_id` / `tenant_id`. Any log line or telemetry event the task emits will be orphan — invisible when an operator searches by correlation ID.
+
+The fix is one line on each side: capture, then restore.
+
+```elixir
+# Task.Supervisor — supervised, fire-and-forget
+parent_metadata = Logger.metadata()
+
+Task.Supervisor.start_child(MyApp.TaskSupervisor, fn ->
+  Logger.metadata(parent_metadata)
+  Logger.info("processing order")          # carries parent's request_id
+  do_work(order)
+end)
+
+# Task.async_stream — same shape
+parent_metadata = Logger.metadata()
+
+orders
+|> Task.async_stream(
+  fn order ->
+    Logger.metadata(parent_metadata)
+    process_order(order)
+  end,
+  ordered: false,
+  max_concurrency: 8
+)
+|> Stream.run()
+```
+
+For Oban workers, set metadata at the start of `perform/1` from the job's args / metadata:
+
+```elixir
+defmodule MyApp.Workers.SyncOrders do
+  use Oban.Worker
+  require Logger
+
+  @impl true
+  def perform(%Oban.Job{args: %{"order_id" => order_id} = args}) do
+    # Restore the request's trace_id from the args the producer wrote in.
+    Logger.metadata(
+      order_id: order_id,
+      trace_id: Map.get(args, "trace_id"),
+      job_id: args["job_id"]
+    )
+    do_work(order_id)
+  end
+end
+```
+
+When the metadata you want to propagate is more than a couple of keys, use an explicit `TraceContext` struct passed as part of the message payload — the planning skill's §11.7 covers the design choice.
+
+**Why metadata, not a struct, in most cases:** `Logger.metadata` is what every existing Logger backend, telemetry handler, and log aggregator already consumes. A struct is "more correct" but doesn't reach the formatter. Use the struct when the trace fields outlive the log scope (cross-PubSub, cross-Oban, cross-node).
+
+**Verification grep:** `grep -rn "Logger.metadata\|Task\." lib/` should show that every `Task.async` / `Task.Supervisor.start_child` call is preceded (in the same function or an enclosing wrapper) by a `Logger.metadata()` capture, OR receives a context struct as an argument.
+
 ---
 
 ## 6. Idiomatic Elixir Constructs
@@ -2159,6 +2217,83 @@ end
 
 def call(conn, {mod, fun, args}) do
   apply(mod, fun, [conn | args])
+end
+```
+
+### 7.12 Async drops Logger.metadata (Pass 13)
+
+```elixir
+# BAD — async closure logs without restoring metadata
+# Result: log line shows up with NO request_id, NO trace_id, NO tenant_id —
+# orphan from the request that spawned it.
+def place(order) do
+  Task.Supervisor.start_child(MyApp.TaskSup, fn ->
+    Logger.info("processing order #{order.id}")
+    process(order)
+  end)
+end
+
+# GOOD — capture parent metadata, restore inside the closure
+def place(order) do
+  parent_metadata = Logger.metadata()
+  Task.Supervisor.start_child(MyApp.TaskSup, fn ->
+    Logger.metadata(parent_metadata)
+    Logger.info("processing order", order_id: order.id)
+    process(order)
+  end)
+end
+```
+
+```elixir
+# BAD — telemetry from async without context — emits but unjoinable
+Task.async(fn ->
+  result = do_work()
+  :telemetry.execute([:my_app, :work, :stop], %{duration_ms: t}, %{result: result})
+end)
+
+# GOOD — explicit context in metadata; survives cross-process boundary
+parent_metadata = Logger.metadata()
+
+Task.async(fn ->
+  Logger.metadata(parent_metadata)
+  result = do_work()
+  :telemetry.execute(
+    [:my_app, :work, :stop],
+    %{duration_ms: t},
+    %{result: result, trace_id: Logger.metadata()[:trace_id]}
+  )
+end)
+```
+
+```elixir
+# BAD — Oban worker doesn't carry the request's trace_id forward
+defmodule MyApp.Workers.Sync do
+  use Oban.Worker
+  def perform(%Oban.Job{args: %{"order_id" => id}}) do
+    Logger.info("syncing order")     # no trace_id — orphan log line
+    do_sync(id)
+  end
+end
+
+# GOOD — job producer puts trace_id in args; worker hydrates Logger.metadata
+defmodule MyApp.Orders do
+  def schedule_sync(order_id) do
+    %{
+      order_id: order_id,
+      trace_id: Logger.metadata()[:trace_id]
+    }
+    |> MyApp.Workers.Sync.new()
+    |> Oban.insert()
+  end
+end
+
+defmodule MyApp.Workers.Sync do
+  use Oban.Worker
+  def perform(%Oban.Job{args: %{"order_id" => id} = args}) do
+    Logger.metadata(order_id: id, trace_id: args["trace_id"])
+    Logger.info("syncing order")     # carries the original request's trace_id
+    do_sync(id)
+  end
 end
 ```
 
