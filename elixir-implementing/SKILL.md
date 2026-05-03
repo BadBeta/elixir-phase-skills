@@ -3286,6 +3286,44 @@ end
 - Internal modules live in a subdirectory: `lib/my_app/catalog/product.ex`, `lib/my_app/catalog/price_calculator.ex`
 - Cross-context calls go through the context public API, never into internals
 
+#### When an `@moduledoc false` module is widely used
+
+If you find that a module marked `@moduledoc false` is reached from many places — multiple contexts, the web layer, Mix tasks, MCP/CLI surface — the marker is lying. The intent says "internal," the call sites say "public infrastructure." Reconcile, don't ignore.
+
+Three responses, by signal:
+
+| Signal | Response | Action |
+|---|---|---|
+| Module is at the top-level (`MyApp.Diagnostic`) OR ≥ 3 contexts call it | **Move to shared kernel** | Either keep at top level with a real `@moduledoc` documenting it as project-wide infrastructure, OR move under `MyApp.Shared.<Name>`. The `@moduledoc false` marker comes off; the call sites stay. |
+| One context plausibly owns the abstraction; thin pass-through suffices | **Facade through the owning context** | Add public functions on the parent context that delegate (`defdelegate`) or wrap with cross-cutting concerns (telemetry, logging). The internal module stays `@moduledoc false`; consumers reach it only through the parent. |
+| The module IS the API many consumers genuinely need; you're committing to back-compat | **Promote to public** | Replace `@moduledoc false` with a real moduledoc. Document API stability. Accept that renames and signature changes are now breaking. |
+
+**Default ordering**: try the shared-kernel form first, then facade, then full promotion. Promotion is the heaviest commitment — it locks the function set in place.
+
+**Counter-indicators**:
+
+- *Shared kernel is wrong* when the abstraction has a clear domain owner — moving it to `MyApp.Shared` hides ownership and creates a god-namespace.
+- *Facade is wrong* when the wrapper would be pure ceremony (`defdelegate :every_function, :as: :every_function`); promotion is more honest.
+- *Promotion is wrong* when the module's internals are likely to evolve — locking with a public moduledoc forecloses future refactor; better to facade and keep flexibility.
+
+The decision points to *where ownership lives*, not *whether the API exists*. Once 3+ unrelated callers reach for the same internal helper, the abstraction is real; only the location is in question.
+
+```elixir
+# Example — Archdo's own evolution: Archdo.Diagnostic was marked
+# @moduledoc false but used by every rule module. The right call was
+# response A (shared kernel) — keep at top-level with a real moduledoc
+# documenting it as the diagnostic-builder infrastructure.
+
+defmodule Archdo.Diagnostic do
+  @moduledoc """
+  Public diagnostic-builder API. Every rule constructs findings via
+  `error/2`, `warning/2`, `info/2`, `nitpick/2` from this module.
+  Stable: rename / signature change is a breaking change to every rule.
+  """
+  # ... defstruct, builders ...
+end
+```
+
 ### 10.2 Behaviour vs protocol — the polymorphism decision
 
 Elixir has two polymorphism mechanisms. Elixir-wide rule: **default to a plain module** — introduce either mechanism only when a real second implementation or test double exists.
