@@ -284,6 +284,9 @@ This is the single most important section to consult at the moment of writing. E
 | Build a string in a loop | IO list + `IO.iodata_to_binary/1` | `Enum.reduce(xs, "", &<>/2)` |
 | Join list into string with separator | `Enum.join(xs, ", ")` or `Enum.map_join/3` | `Enum.reduce` with `<>` |
 | Parse a known binary layout | Binary pattern matching `<<a::8, b::16, rest::binary>>` | `String.split` on byte boundaries |
+| Parse a known-shape header / fixed prefix (auth header, port-prefix, length-prefix) | Binary pattern matching: `<<"Bearer ", token::binary>>` | `Regex.run(~r/Bearer\s+(.+)/, header)` — slower, recompiled per call |
+| Split on a single-character delimiter | `String.split(value, ":", parts: 2)` | `Regex.run(~r/^([^:]+):(.+)$/, value)` |
+| Parse a real grammar (TLS handshake, DSL, query language) | `NimbleParsec` parser combinator | A regex chain; or a hand-written recursive descent that grows uncontrollably |
 | Convert integer to string | `Integer.to_string/1,2` | `"#{n}"` (allocates, slower) |
 | Convert to atom from user input | `String.to_existing_atom/1` | `String.to_atom/1` (exhausts atom table) |
 | Coerce unknown-type value for display | `inspect/1` | `to_string/1` (raises for some types) |
@@ -1824,7 +1827,7 @@ end
 
 Targeted at the specific mistakes that appear in LLM-generated Elixir. Each pair is a pattern Claude is prone to emit; the GOOD side is what idiomatic code looks like.
 
-### 7.1 Control flow
+### 7.1 Control flow (Pass 14B nested case, 14C pattern-match in heads)
 
 ```elixir
 # BAD — if/else chain dispatching on data shape
@@ -1916,7 +1919,7 @@ cond do
 end
 ```
 
-### 7.2 Pipelines
+### 7.2 Pipelines (Pass 14 idiomatic / readability)
 
 ```elixir
 # BAD — single-step pipe
@@ -1961,7 +1964,7 @@ data |> (fn x -> x * 2 end).()
 data |> then(&(&1 * 2))
 ```
 
-### 7.3 Enum / iteration
+### 7.3 Enum / iteration (Pass 14 idiomatic / performance)
 
 ```elixir
 # BAD — Enum.each to accumulate (rebinding doesn't escape the closure!)
@@ -2024,7 +2027,7 @@ Enum.reduce(pairs, %{}, fn {k, v}, acc -> Map.put(acc, k, v * 2) end)
 Map.new(pairs, fn {k, v} -> {k, v * 2} end)
 ```
 
-### 7.4 Error handling
+### 7.4 Error handling (Pass 5 sanitization, Pass 9 functional core)
 
 ```elixir
 # BAD — try/rescue for an expected failure
@@ -2098,7 +2101,7 @@ rescue
 end
 ```
 
-### 7.5 Data manipulation
+### 7.5 Data manipulation (Pass 14 idiomatic, Pass 5 secret-bearing struct updates)
 
 ```elixir
 # BAD — Map.put for a struct field (silently adds unknown keys with typos)
@@ -2138,7 +2141,7 @@ rows
 |> IO.iodata_to_binary()
 ```
 
-### 7.6 Pattern matching gotchas
+### 7.6 Pattern matching gotchas (Pass 14C)
 
 ```elixir
 # BAD — forgot the pin; variable rebinds and matches anything
@@ -2173,7 +2176,7 @@ params = %{"name" => "Jane"}
 %{name: n} = internal_map       # Internal data → atom keys
 ```
 
-### 7.7 Atoms and safety
+### 7.7 Atoms and safety (Pass 3)
 
 ```elixir
 # DANGEROUS — user input becomes permanent atoms (atom table exhaustion, ~1M limit)
@@ -2185,7 +2188,7 @@ String.to_existing_atom(user_input)
 Jason.decode!(json)             # Default keys: :strings
 ```
 
-### 7.8 Function and API design
+### 7.8 Function and API design (Pass 4 ambient authority, Pass 12 packages)
 
 ```elixir
 # BAD — boolean parameters obscure intent at call sites
@@ -2220,7 +2223,7 @@ defmodule MyLib.Client do
 end
 ```
 
-### 7.9 Process / OTP
+### 7.9 Process / OTP (Pass 7 lifecycle, Pass 8 mailbox/backpressure, Pass 9 functional core)
 
 ```elixir
 # BAD — spawn for long-running work (unsupervised)
@@ -2280,7 +2283,7 @@ def init(_) do
 end
 ```
 
-### 7.10 Tests
+### 7.10 Tests (cross-cutting; not a single cleanup-guide pass)
 
 ```elixir
 # BAD — asserting on inspect output (no structural diff, brittle)
