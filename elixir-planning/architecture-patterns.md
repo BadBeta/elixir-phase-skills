@@ -156,6 +156,71 @@ See `SKILL.md §6` for the full decision framework. Summary:
 - Entities share an aggregate root
 - Constant cross-context calls (you have a boundary misalignment)
 
+### 3.5 Context as building-block + orchestrator
+
+> **Depth:** [building-blocks.md](building-blocks.md) — full seven-axis checklist, classification decision tree, refactor patterns.
+
+A context that maximizes its "building-block surface" is one that
+composes well, property-tests cleanly, and stays maintainable as it
+grows. Rather than treating a context as a single monolithic public
+API, design it as **two layers**:
+
+```
+lib/my_app/catalog.ex                   # Building-block — public pure API
+lib/my_app/catalog/product.ex           # Building-block — schema + changesets (pure)
+lib/my_app/catalog/price_calculator.ex  # Building-block — math
+lib/my_app/catalog/sku_normalizer.ex    # Building-block — pure transforms
+lib/my_app/catalog/workflow.ex          # Orchestrator — Repo, telemetry, PubSub
+```
+
+The **building-block layer** (everything except `workflow.ex`) has:
+- No `Repo` calls
+- No `Logger` / `:telemetry` / `Phoenix.PubSub`
+- No `Application.get_env` / `Process.get` / `:persistent_term`
+- No `DateTime.utc_now` / random / unique-id
+- Every public function has a `@spec`
+- Every public function returns ok/error tuples (never raises)
+- Every public function constrains its input domain (guards or
+  specific patterns)
+
+The **orchestrator layer** (`workflow.ex`) connects the building-block
+layer to side effects. It's small — a few functions — and explicitly
+named. Tests for the orchestrator use DataCase + Mox; tests for the
+building-block layer are plain ExUnit / property tests.
+
+**Why this matters at the planning stage:**
+- Decide upfront which functions live where. Mixing them mid-implementation
+  produces "this module is hard to test" — the dominant cost in
+  Phoenix codebases.
+- The classification fits Archdo's `Blackbox.context_verdict/2`: a context
+  is a building-block iff every module under its namespace passes the
+  building-block checklist.
+- Property-test ROI: building-block modules are the natural target for
+  StreamData. If you can't write a property test for a context's domain
+  module, the module is leaking — and you don't know it until you try.
+
+**When a context CAN'T be a building-block:**
+- Authentication / session — every login mutates the DB
+- Background-job dispatch — enqueues, schedules, and runs effectful work
+- Real-time connection lifecycle — PubSub subscribe/publish
+
+These are honest orchestrator-contexts. Don't fight it; document it
+in the context module's moduledoc:
+
+```elixir
+defmodule MyApp.Sessions do
+  @moduledoc """
+  Orchestrator context — authenticates users and tracks live
+  sessions. Effects: DB writes (insert session), telemetry, Mailer.
+  Pure rules live in `MyApp.Sessions.Rules` (building-block).
+  """
+end
+```
+
+**Aim point** for a typical Phoenix app: ≥ 60% of `lib/my_app/`
+modules are building-blocks; ≥ 80% of pure-domain modules. Use
+`Archdo.Blackbox.context_verdict/2` quarterly to track drift.
+
 ---
 
 ## 4. Hexagonal Architecture (Ports & Adapters)
@@ -736,6 +801,94 @@ This is one of the highest-leverage refactors for a context whose internals have
 - **The struct is owned by Phoenix/Ecto/another framework** and is part of THEIR contract (Plug.Conn, Ecto.Changeset, Phoenix.Socket). Their opacity decisions trump yours; matching their fields is normal and safe.
 - **Only one consumer exists, in the same context** — opacity buys nothing. Wait for the second consumer.
 - **You're about to add accessors that 1-to-1 mirror the struct's fields** with no business logic — that's pure boilerplate. Ask: are these fields really an implementation detail, or are they the API? If the latter, expose the type (`@type`) and skip the accessors.
+
+#### 4.12.8 Phantom / branded types — encoding state in the type
+
+When a value has multiple lifecycle states — verified vs. unverified, sealed vs. open, draft vs. published — encoding the state IN THE TYPE prevents downstream functions from accidentally accepting the wrong state. This is the **phantom-type** pattern, adapted to Elixir's structural type system: instead of one struct with a `:status` field, you ship TWO structs (or a struct family) where the type itself carries the state.
+
+**The pattern:**
+
+```elixir
+defmodule MyApp.Email do
+  @opaque t :: %__MODULE__{address: String.t()}
+  defstruct [:address]
+
+  @spec new(String.t()) :: {:ok, t()} | {:error, :invalid_format}
+  def new(input) do
+    case validate(input) do
+      :ok -> {:ok, %__MODULE__{address: String.downcase(input)}}
+      {:error, _} = e -> e
+    end
+  end
+
+  def to_string(%__MODULE__{address: a}), do: a
+  defp validate(input), do: # ... regex / RFC 5322 / dnsbl check
+end
+
+defmodule MyApp.UnverifiedEmail do
+  @opaque t :: %__MODULE__{address: String.t(), nonce: String.t()}
+  defstruct [:address, :nonce]
+
+  @spec new(String.t(), String.t()) :: t()
+  def new(address, nonce), do: %__MODULE__{address: address, nonce: nonce}
+end
+
+defmodule MyApp.Accounts.Verifier do
+  alias MyApp.{Email, UnverifiedEmail}
+
+  @spec verify(UnverifiedEmail.t(), submitted_nonce :: String.t()) ::
+          {:ok, Email.t()} | {:error, :nonce_mismatch}
+  def verify(%UnverifiedEmail{nonce: nonce, address: address}, submitted)
+      when nonce == submitted do
+    Email.new(address)
+  end
+
+  def verify(_unverified, _submitted), do: {:error, :nonce_mismatch}
+end
+
+# Downstream consumers take only the validated type:
+defmodule MyApp.Mailer do
+  @spec send(Email.t(), subject :: String.t(), body :: String.t()) :: :ok | {:error, term()}
+  def send(%Email{} = to, subject, body), do: # ...
+  # CAN'T call Mailer.send(unverified, ...) — type mismatch
+end
+```
+
+**What this buys at the architectural level:**
+
+- **One validation point.** `Email.new/1` is the ONLY function that constructs a verified `Email`. Add new constraints there; every consumer inherits them.
+- **Compile-time-ish enforcement.** Elixir's type system isn't compile-checked the way Haskell or Rust is, but Dialyzer + structural pattern matching prevent the most common mistakes. A function head `def send(%Email{} = e, ...)` will not match an `%UnverifiedEmail{}`; the call falls through to no clause and raises.
+- **Contract clarity.** `@spec send(Email.t(), ...)` reads as "this function takes a verified email" without prose.
+
+**Canonical examples for which to plan phantom types:**
+
+| Domain value | Unverified state | Verified state | Transition |
+|---|---|---|---|
+| Email | `%UnverifiedEmail{}` (after registration) | `%Email{}` (after click-confirmation) | `Verifier.verify/2` with token |
+| OAuth access token | `%RawToken{}` (raw bearer) | `%AccessToken{}` (post-introspection) | `Auth.introspect/1` with provider |
+| Document | `%DraftDocument{}` | `%PublishedDocument{}` | `Editor.publish/1` (irreversible) |
+| Payment intent | `%UnconfirmedIntent{}` | `%CapturedPayment{}` | `Payments.capture/1` (settlement) |
+| User registration | `%PendingRegistration{}` | `%User{}` | `Accounts.confirm/1` |
+
+**When NOT to use phantom types:**
+
+- The state is mutable in both directions (account active ⇄ deactivated). A boolean field on one struct is fine; the type doesn't gain you anything.
+- The domain has 5+ states with complex transitions. Use a state machine (`:gen_statem` or `AshStateMachine`) — phantom types don't compose cleanly with multi-step FSMs.
+- The state is purely cosmetic / informational, not a precondition for any operation. Use a regular field.
+
+**Round-trip property — always pair with a serializer:**
+
+```elixir
+property "email round-trip" do
+  check all valid_input <- valid_email_generator() do
+    {:ok, email} = MyApp.Email.new(valid_input)
+    serialized = MyApp.Email.to_string(email)
+    assert {:ok, ^email} = MyApp.Email.new(serialized)
+  end
+end
+```
+
+The round-trip property is the safety net for opacity — if the encoder loses information that the decoder can't recover, the bidirectional pair is broken. Property-test every `to_*`/`from_*` pair you ship.
 
 ---
 

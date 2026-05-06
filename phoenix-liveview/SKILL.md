@@ -19,6 +19,7 @@ description: Phoenix LiveView guidance including lifecycle, components, forms, s
 10. ALWAYS use `phx-update="stream"` with a unique `id` on the container and `id={dom_id}` on each item when using streams
 11. ALWAYS pass data to LiveComponents via assigns, communicate back via `send/2` or callback assigns — never reach into parent state
 12. NEVER copy large data structures (full conn, socket) into spawned processes or async assigns — extract only needed fields first
+13. ALWAYS use `start_async/3` + `handle_async/3` (the CPS pattern — `start_async` runs the operation in a Task; `handle_async/3` IS the continuation that receives its result) for non-instantaneous work in `handle_event/3` / `handle_info/2`. Inline blocking calls — `Req.get!`, `HTTPoison.get!`, `File.read!` of a remote-mounted path, slow `Repo.all` queries — freeze the entire LiveView process; subsequent events queue or time out. The `assign_async/3` helper is the same CPS pattern packaged with built-in loading/error UI. See "Async as Continuation-Passing Style (CPS)" below for the framing.
 
 ## Decision Tables
 
@@ -244,6 +245,96 @@ def handle_async(:fetch_data, {:exit, reason}, socket) do
   {:noreply, assign(socket, error: "Failed to load")}
 end
 ```
+
+## Async as Continuation-Passing Style (CPS)
+
+LiveView's async API — `start_async/3` paired with `handle_async/3`, and the higher-level `assign_async/3` — IS continuation-passing style adapted to the LiveView lifecycle:
+
+- **`start_async(socket, name, fn -> work end)`** kicks off `work` in a Task supervised by the LiveView. The work runs concurrently with the LV process; the LV is free to handle other events while it runs.
+- **`handle_async(name, {:ok, result} | {:exit, reason}, socket)`** IS THE CONTINUATION. When the Task completes, the LV receives a message and dispatches to `handle_async/3`. That callback is "the rest of the computation" — it gets the result and decides what to do with it (assign, navigate, push event).
+
+The same shape underlies `assign_async/3`:
+
+```elixir
+# CPS shape
+def mount(_params, _session, socket) do
+  {:ok, assign_async(socket, :stats, fn -> {:ok, %{stats: load_dashboard_stats()}} end)}
+  # The continuation is built-in — assign_async creates a %Phoenix.LiveView.AsyncResult{}
+  # struct that templates render via <.async_result :let={stats} assign={@stats}>
+end
+```
+
+**Why this matters: a LiveView is a long-lived process.** Every `handle_event/3` and `handle_info/2` runs serially in that process. If a callback blocks for 2 seconds, every other event from that user queues for 2 seconds. Multi-second blocks under load become indistinguishable from the LV being dead. The CPS pattern keeps the LV's main event loop free; the Task does the slow work; the continuation reintegrates the result.
+
+**Decision: when to use which async helper:**
+
+| Need | Use | Why |
+|---|---|---|
+| Load data on mount with built-in loading/error UI | `assign_async/3` | Built-in `<.async_result>` template handles loading + failed states |
+| User-triggered async work; control over when continuation runs | `start_async/3` + `handle_async/3` | Lets you push events, redirect, accumulate results across calls |
+| Stream of partial results (a query that emits chunks) | `start_async/3` + `handle_info/2` (custom messages from the Task) | More flexible than `handle_async/3`'s single-result shape |
+| Fire-and-forget side effect; LV doesn't need the result | `Task.Supervisor.start_child/2` (NOT inside `start_async`) | No need for the LV to be the continuation — the Task is the orchestrator |
+
+**Anti-pattern — inline blocking work:**
+
+```elixir
+# BAD — blocks the LiveView process for the duration of the HTTP call
+def handle_event("fetch_report", %{"report_id" => id}, socket) do
+  {:ok, %{body: data}} = Req.get!("https://api.example.com/reports/#{id}")
+  # ↑ blocks here. Every other event from this user queues until this returns.
+  {:noreply, assign(socket, :report, data)}
+end
+
+# GOOD — start_async kicks off the work; handle_async/3 is the continuation
+def handle_event("fetch_report", %{"report_id" => id}, socket) do
+  {:noreply, start_async(socket, :fetch_report, fn ->
+    Req.get!("https://api.example.com/reports/#{id}")
+  end)}
+end
+
+def handle_async(:fetch_report, {:ok, %{body: data}}, socket) do
+  {:noreply, assign(socket, :report, data)}
+end
+
+def handle_async(:fetch_report, {:exit, reason}, socket) do
+  {:noreply, put_flash(socket, :error, "Failed to load report: #{inspect(reason)}")}
+end
+```
+
+**Capture discipline (also rule 12):** the function passed to `start_async/3` runs in a separate process — it captures its closure. **Extract the values you need before passing the function**; never capture the whole socket:
+
+```elixir
+# BAD — captures the entire socket into the spawned Task
+{:noreply, start_async(socket, :fetch, fn -> process(socket.assigns) end)}
+
+# GOOD — extract first
+user_id = socket.assigns.current_user.id
+{:noreply, start_async(socket, :fetch, fn -> process(user_id) end)}
+```
+
+**`assign_async/3` template — the most common shape:**
+
+```elixir
+def mount(_params, _session, socket) do
+  {:ok,
+   socket
+   |> assign(:page_title, "Dashboard")
+   |> assign_async(:stats, fn -> {:ok, %{stats: load_stats()}} end)
+   |> assign_async(:recent_orders, fn -> {:ok, %{recent_orders: load_recent()}} end)}
+end
+```
+
+```heex
+<.async_result :let={stats} assign={@stats}>
+  <:loading>Loading stats…</:loading>
+  <:failed :let={reason}>Couldn't load stats: {inspect(reason)}</:failed>
+  <p>Total: {stats.total}</p>
+</.async_result>
+```
+
+The `<.async_result>` component packages the three states (loading, ok, failed) of the CPS continuation. When the Task is running, the `:loading` slot renders. When it returns `{:ok, _}`, the body renders with the bound result. When it crashes, the `:failed` slot renders.
+
+Cross-reference: composition primitive in `elixir-implementing/SKILL.md` §5.10 — CPS is the framework-specific composition shape that pairs LV's lifecycle with the building-block / orchestrator split. The LiveView IS the orchestrator; the Task body should call into building-block functions.
 
 ## Function Components
 
