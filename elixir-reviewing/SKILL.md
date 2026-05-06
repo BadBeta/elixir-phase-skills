@@ -1525,6 +1525,105 @@ defmodule MyApp.Pricing.Workflow do
 end
 ```
 
+**Compound impurities — extract capabilities first.** Real modules rarely have just one impurity; the textbook BB+orchestrator split assumes a single Logger call but production code typically mixes hidden inputs (`Application.get_env`, `Endpoint.url()`) with non-determinism (`DateTime.utc_now`, `:rand.uniform`) AND with effects (`Logger`, `Repo`, `PubSub`). The naive split won't work — the "pure" half is still impure.
+
+**Two-step refactor for compound impurities:**
+
+```elixir
+# BEFORE — three impurity classes mixed in (verified production case:
+#          algora/lib/algora/bot_templates/bot_templates.ex)
+defmodule MyApp.BotTemplates do
+  @moduledoc false
+
+  def placeholders(:bounty_created, user) do
+    %{
+      # ↓ HIDDEN INPUT (axis 1) — reads endpoint config from Application env
+      "FUND_URL" => MyAppWeb.Endpoint.url(),
+      "REPO_FULL_NAME" => "#{user.handle}/repo",
+      "ATTEMPTS" => """
+      | Attempt | Started (UTC) | Solution |
+      | --- | --- | --- |
+      | @jsmith | #{Calendar.strftime(DateTime.utc_now(), "%b %d, %Y")} | ... |
+      #                            ↑ NON-DETERMINISM (axis 2)
+      """,
+      # ... more placeholders
+    }
+  end
+
+  def get_template(org_id, type) do
+    # ↓ EFFECT (axis 5) — reads from DB
+    Repo.get_by(BotTemplate, user_id: org_id, type: type, active: true)
+  end
+end
+```
+
+**Step 1 — extract capabilities to arguments** (fixes axes 1, 2; the function is now PURE but still in the same module):
+
+```elixir
+defmodule MyApp.BotTemplates do
+  @moduledoc false
+
+  # Pure: takes the previously-hidden inputs as arguments
+  def placeholders(:bounty_created, user, ctx) do
+    %{
+      "FUND_URL" => ctx.endpoint_url,                                # was Endpoint.url()
+      "REPO_FULL_NAME" => "#{user.handle}/repo",
+      "ATTEMPTS" => """
+      | Attempt | Started (UTC) | Solution |
+      | --- | --- | --- |
+      | @jsmith | #{Calendar.strftime(ctx.now, "%b %d, %Y")} | ... |
+      #                          ↑ now from ctx
+      """
+    }
+  end
+
+  # ctx struct bundles the capabilities (Reader-monad shape per
+  # elixir-planning §4.7.4 / rule 22c)
+  defmodule Ctx do
+    @enforce_keys [:endpoint_url, :now]
+    defstruct [:endpoint_url, :now]
+  end
+
+  # Effects still here — split next
+  def get_template(org_id, type) do
+    Repo.get_by(BotTemplate, user_id: org_id, type: type, active: true)
+  end
+end
+```
+
+**Step 2 — split BB / orchestrator** (fixes axis 5; orchestrator builds the ctx and calls the BB):
+
+```elixir
+defmodule MyApp.BotTemplates do
+  @moduledoc "Building block: pure template rendering."
+  defmodule Ctx do
+    @enforce_keys [:endpoint_url, :now]
+    defstruct [:endpoint_url, :now]
+  end
+
+  def placeholders(:bounty_created, user, %Ctx{} = ctx), do: ...
+  def get_default_template(:bounty_created), do: ...
+end
+
+defmodule MyApp.BotTemplates.Workflow do
+  @moduledoc "Orchestrates bot templates — builds ctx, hits Repo."
+  alias MyApp.{BotTemplates, BotTemplates.Ctx, Repo}
+
+  def render_for_user(type, user) do
+    ctx = %Ctx{endpoint_url: MyAppWeb.Endpoint.url(), now: DateTime.utc_now()}
+    BotTemplates.placeholders(type, user, ctx)
+  end
+
+  def get_template(org_id, type) do
+    Repo.get_by(BotTemplate, user_id: org_id, type: type, active: true)
+  end
+end
+```
+
+**Why two steps, not one:** trying to do BB-split AND capability-extraction in one refactor produces a `MyApp.BotTemplates` module that's pure-shaped but still calls `Endpoint.url()` from inside — failing axis 1 silently. Step 1 makes the impurity explicit (it's now in arguments); Step 2 then has a real BB to extract. Reviewers should ask "what are ALL the impurity axes failed?" before suggesting the split — incomplete extraction wastes time.
+
+**Cross-ref:** `elixir-planning/building-blocks.md` §3.1 (seven-axis checklist), `elixir-planning` §4.7.4 (capability passing / Reader-monad shape).
+
 ### 11.17 Replace `Enum.*` chain with `Stream.*` over a streamy source
 
 ```elixir
