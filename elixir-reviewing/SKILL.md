@@ -548,7 +548,7 @@ Full reference: `elixir-implementing` §5.10 (composition patterns), `elixir-pla
 | 3+ consecutive `subject = Mod.fun(subject, ...)` rebindings to the same name (Multi/Conn/Socket/Changeset builder pattern) | Thread with pipes: `Mod.new() \|> Mod.fun1(...) \|> Mod.fun2(...)`. The rebind form is imperative-flavored — forces the reader to verify each line refers to the previous binding. Cross-ref `elixir-implementing` §5.10.13. | Suggest | 6.101 BuilderPatternNotThreaded |
 | Public `to_X/1` (encoder: `to_string`, `to_json`, `to_url`, `to_iodata`) without a matching `from_X` / `parse_X` / `decode_X` in the same module | Either add the inverse (with a round-trip property test asserting `decode(encode(x)) == x`), OR if the output is for human display only, implement `String.Chars` / `Inspect` instead — those don't imply a round-trip contract. Cross-ref `elixir-planning` §4.7.5, `architecture-patterns.md` §4.12.8. | Suggest | 6.102 EncoderWithoutDecoder |
 | Module with `defstruct` + smart constructor (`validate`/`parse`/`build`/`new` returning `{:ok, %__MODULE__{}}`) + functions taking `%__MODULE__{}` as input | Consider phantom types: split into `%UnverifiedEmail{}` (raw input) and `%Email{}` (validated). Consumers signed for `%Email{}` are statically guaranteed validated. Defensive answer: keep the single struct + add a property test asserting validate's invariant. Cross-ref `elixir-planning/architecture-patterns.md` §4.12.8. | Suggest (judgment-soft); Request-change only if validation is non-trivial AND consumers should not accept raw input | 6.103 PhantomTypeOpportunity |
-| `with` chain ≥7 `<-` clauses in one function | Architectural drift signal. 2–4 healthy, 5–6 approaching limit, 7+ split into named phases (smaller `with` chains called sequentially). Long chains hide the call graph. Cross-ref `elixir-implementing` §5.10.4. | Request-change | n/a (judgment) |
+| `with` chain ≥7 `<-` clauses in one function | Architectural drift signal — investigate, don't auto-flag. 2–4 healthy, 5–6 approaching limit, 7+ deserves a look. **Genuine exceptions** to the "split it" advice (verified against production code): a deliberate **filter cascade** where every `<-` is a "should we proceed?" predicate (e.g., social-feed filtering — Pleroma's `streamer.ex:198` runs 11 filter checks; splitting would harm clarity); a **threading-builder disguised as `with`** where every step is `%{error: nil} = subject <- step(subject)` (e.g., logflare's `logs_search.ex:60`). Read the chain before flagging. Cross-ref `elixir-implementing` §5.10.4. | Suggest (with note "verify this isn't a deliberate filter / state-machine") | n/a (judgment) |
 | `with` `else` clause that handles success values, OR catch-all `else` clauses re-raising errors (`else x -> x`) | Bare `with` (no `else`) is the LCO-safe railway form — errors propagate transparently. Add `else` ONLY to translate error shapes for callers; never to handle success. Catch-all `else` adds nothing the bare form doesn't already do. Cross-ref `elixir-implementing` §5.10.1, §5.10.2. | Request-change for new code; Suggest for legacy | n/a (idiom) |
 | Building-block-flavored function (per axes 1–6) with capabilities read inline (`DateTime.utc_now`, `:rand.uniform`, `Application.get_env`, `:persistent_term.get`) | Pass the capability as an argument. For 2+ capabilities, bundle into a `ctx` struct threaded through the call chain. The orchestrator resolves and provides the capability. Cross-ref `elixir-implementing` §5.10.8, `elixir-planning` rule 22c. | Request-change for modules claiming building-block status; Suggest otherwise | n/a (related to 5.74) |
 
@@ -1319,10 +1319,12 @@ def fetch(id), do: ...
 def fetch(id), do: ...
 ```
 
-### 11.10 Replace short-circuit `with` chain with error-accumulating reduce
+### 11.10 Replace short-circuit `with` chain with accumulating validation
+
+**The dominant idiom**: `Ecto.Changeset` validators (`validate_required`, `validate_format`, `validate_length`, `validate_number`, etc.) are already **accumulating by design** — every validator that fires adds to `changeset.errors`. If the data is changeset-shaped (struct-with-fields, schema-backed), reach for the changeset before reaching for a manual reduce.
 
 ```elixir
-# BEFORE — short-circuit on first error; user fixes one field, resubmits, sees next error
+# BEFORE — manual short-circuit on first error
 def validate_signup(params) do
   with {:ok, email} <- validate_email(params),
        {:ok, password} <- validate_password(params),
@@ -1331,8 +1333,24 @@ def validate_signup(params) do
   end
 end
 
-# AFTER — accumulate errors so the user fixes everything in one pass
+# AFTER (idiomatic Elixir for any schema-backed data) — Ecto changeset
 def validate_signup(params) do
+  %Signup{}
+  |> Ecto.Changeset.cast(params, [:email, :password, :age])
+  |> Ecto.Changeset.validate_required([:email, :password, :age])
+  |> Ecto.Changeset.validate_format(:email, ~r/@/)
+  |> Ecto.Changeset.validate_length(:password, min: 8)
+  |> Ecto.Changeset.validate_number(:age, greater_than_or_equal_to: 13)
+end
+# All validators always run; errors accumulate in changeset.errors;
+# the LiveView form gets every error at once.
+```
+
+**When changeset isn't the right shape** — schemaless data (raw maps from external systems, batch import rows, multi-rule policy checks) — use the manual accumulating reduce:
+
+```elixir
+# AFTER (non-changeset) — manual accumulating reduce
+def validate_signup_payload(params) do
   [
     {:email, &validate_email/1},
     {:password, &validate_password/1},
@@ -1350,6 +1368,8 @@ def validate_signup(params) do
   end
 end
 ```
+
+**Decision rule**: if the data has (or will have) an Ecto schema, the changeset path is the answer — it IS the accumulating reduce, written once in a domain-friendly DSL. Reach for the manual form only when changesets don't fit (schemaless params, non-cast validators, custom error shapes).
 
 ### 11.11 Hoist expensive call to module attribute
 
