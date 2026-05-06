@@ -78,6 +78,8 @@ The core SKILL.md carries the always-loaded rules, severity guidance, workflow, 
 10. **NEVER flag style issues that `mix format` or `mix credo` would catch.** Reviews are for things tools miss: architecture, idioms, subtle correctness, testability, performance.
 11. **ALWAYS flag missing tests and `@spec` on public functions** — these are easy to add, compound in value over time, and are the strongest signal that a change was thought through.
 12. **PREFER benchmark-driven refactor suggestions over intuition.** "This could be faster" is weak; "this is 40% slower in the linked Benchee run" is actionable.
+13. **ALWAYS check the composition shape on diffs that pipe ok/error or thread state.** Before flagging a `with`-chain, identify which composition mechanism the operation NEEDS: pipeline (transform), railway (`with`, sequential dependency), accumulating reduce (independent validations), threading-builder (Multi/Conn/Socket), protocol/behaviour (dispatch). The wrong shape is the most common architectural smell on diffs that "just look long" — and it's invisible without naming the shape. Cross-reference: `elixir-implementing` §5.10 (composition patterns), `elixir-planning` §4.7 (composition design vocabulary).
+14. **ALWAYS check building-block axes when reviewing a module marked `@moduledoc "Building block ..."` or claimed pure.** Walk the seven-axis checklist (input closure, determinism, `@spec`, totality, side-effect freedom, errors-as-values, input guard) for every public function. A building-block module that calls `Logger`, `Repo`, `Phoenix.PubSub`, `:telemetry.execute`, `Application.get_env`, `DateTime.utc_now`, or `:rand.uniform` inside a function body fails axis 5 (effect-free) or axis 1 (input-closure) and is silently lying. Cross-reference: `elixir-planning/building-blocks.md` (the seven-axis checklist), Archdo CE-54..57 (`BlackboxQuadrant`, `UntestedBuildingBlock`, `EffectLeak`, `UnguardedBuildingBlock`).
 
 ---
 
@@ -166,6 +168,10 @@ Every review finding should answer: "why wouldn't a linter catch this?" If the a
 - [ ] No `Process.sleep` in tests (see §7.7)
 - [ ] Idempotent for retried operations (Oban workers, webhook handlers — see §7.6)
 - [ ] Timeouts set where appropriate (see §7.9)
+- [ ] **Composition shape matches operation intent** — `with` for sequential dependency, accumulating reduce for independent validations, threading-builder for state accumulation, pipeline for transforms. Wrong shape on a 5+ step chain is the #1 architectural smell on diffs that "just look long" (see §7.12)
+- [ ] **Building-block modules are pure** — modules whose `@moduledoc` claims building-block status (or that the diff intends to be one) pass the seven-axis checklist: no `Logger`/`Repo`/`PubSub`/`telemetry`/`ets`/`persistent_term` writes inside function bodies; no hidden inputs (`Application.get_env`/`DateTime.utc_now`/`:rand.uniform`); no raises (use ok/error); narrow input domain (see §7.13)
+- [ ] **Subject-first arg order** on public functions — first arg is the data being transformed, options last. Backwards (`def fun(opts, data)`) breaks pipe composition (see §7.12)
+- [ ] **LiveView `handle_event/3` does not block** — synchronous HTTP / heavy computation freezes the LV process; wrap in `start_async/3` + `handle_async/3` (see §7.14)
 
 ---
 
@@ -524,6 +530,72 @@ Migrations are a distinct artifact class. The bugs are bigger (production data l
 - [ ] **Rolling-deploy compatible** — during deploy, old code runs against the new schema (and vice-versa). Columns can't be renamed in one step: (1) add new; (2) deploy code reading both; (3) backfill; (4) deploy code reading only new; (5) drop old.
 
 Block-severity: missing down, NOT NULL without backfill, schema module aliased in the migration, unindexed FK. Request-change: precision mismatch, un-pinned Oban migration. Suggest: adding `@moduledoc` explaining the non-obvious parts.
+
+### 7.12 Composition shape review
+
+Full reference: `elixir-implementing` §5.10 (composition patterns), `elixir-planning` §4.7 (composition design vocabulary). The most common architectural smell on diffs is **the wrong composition shape** for the operation — not bad code, just the wrong primitive. Six mechanisms cover most production code: Pipeline (transform), Stream (lazy pipeline), Threading-builder (Multi/Conn/Socket — subject type fixed, state accumulates), Railway (`with` for sequential ok/error), Protocol/Behaviour (dispatch), Process (concurrent state). Mixing them in one operation, or picking the wrong one, is what makes diffs "look long" without being clearly bad.
+
+**Diagnosis approach when reviewing a chain:** name the shape the code *uses* (rebind chain, `with` chain, manual recursion, eager `Enum`). Then name the shape the operation *needs* (independent validators? sequential dependency? lazy stream?). Mismatches are the findings.
+
+| If you see... | Suggest instead | Severity | Archdo rule |
+|---|---|---|---|
+| `with` chain (≥2 `<-`) inside `validate_*` / `import_*` / `bulk_*` / `check_*` function whose success body combines 2+ bound values into a struct/map | Replace with **error-accumulating reduce** — short-circuit gives bad UX (user fixes one field, resubmits, sees next error). Wrap each validator in a reducer that collects errors into a list; return `{:error, errors}` if non-empty. Cross-ref `elixir-implementing` §5.10.6, `elixir-planning` §4.7.2. | Request-change for form/UX-facing flows; Suggest for internal | 6.95 ShortCircuitOverAccumulating |
+| `case fetch() do {:ok, v} -> {:ok, transform(v)}; {:error, _} = e -> e end` (verbose Result.map) | `with {:ok, v} <- fetch(), do: {:ok, transform(v)}`, OR a `Result.map/2` helper if the shape recurs in 3+ places. The `case` shape buries the intent. | Suggest | 6.96 ResultMapOpportunity |
+| Public 2-arg function with first arg named `opts`/`options`/`config` and last arg looking like the data subject (named `data`/`list`/`map`/`subject` or destructured `%Schema{} = subject`) | Reorder to subject-first: `def fun(data, opts)`. The stdlib (`Enum.map(coll, fn)`, `String.replace(s, pat, rep)`) is rigorous; backwards order silently breaks every downstream pipeline. Renaming arguments is a 5-minute refactor that pays off forever. Cross-ref `elixir-implementing` §5.10.10. | Request-change in domain APIs; Suggest in adapters | 6.97 PipeSubjectPosition |
+| 2+ levels of nested `Map.update` / `Map.put` lambdas reaching into a known structure | `update_in(state, [:a, :b], &fn)` / `put_in(state, [:a, :b], v)`. Nested-lambda form obscures the path; `update_in` says it in one line and composes. Cross-ref `elixir-implementing` §5.10.9. | Suggest | 6.98 NestedMapUpdateAsUpdateIn |
+| Pipeline starting with `File.stream!` / `Repo.stream` / `Stream.resource` / `Stream.unfold` followed by 3+ eager `Enum.*` steps | Replace intermediate `Enum.*` with `Stream.*`; only the terminal step (`reduce`/`count`/`into`) must be eager. Each eager step materializes the whole intermediate list, defeating the lazy producer. Order-of-magnitude memory difference on large inputs. Cross-ref `elixir-implementing` §5.10.11. | Request-change if input may be large; Suggest otherwise | 6.99 StreamOverEnumOpportunity |
+| Two-clause private function: `defp f([], acc), do: acc; defp f([h \| t], acc), do: f(t, transform(h, acc))` | `Enum.reduce(xs, init, fn h, acc -> transform(h, acc) end)` — or one of `reduce_while` / `map_reduce` / `flat_map_reduce` / `Enum.sum` / `Enum.frequencies` depending on shape. Manual recursion is only needed for non-fold shapes (tree traversal, mutual recursion). Cross-ref `elixir-implementing` §5.10.12. | Suggest | 6.100 ManualRecursionAsReduce |
+| 3+ consecutive `subject = Mod.fun(subject, ...)` rebindings to the same name (Multi/Conn/Socket/Changeset builder pattern) | Thread with pipes: `Mod.new() \|> Mod.fun1(...) \|> Mod.fun2(...)`. The rebind form is imperative-flavored — forces the reader to verify each line refers to the previous binding. Cross-ref `elixir-implementing` §5.10.13. | Suggest | 6.101 BuilderPatternNotThreaded |
+| Public `to_X/1` (encoder: `to_string`, `to_json`, `to_url`, `to_iodata`) without a matching `from_X` / `parse_X` / `decode_X` in the same module | Either add the inverse (with a round-trip property test asserting `decode(encode(x)) == x`), OR if the output is for human display only, implement `String.Chars` / `Inspect` instead — those don't imply a round-trip contract. Cross-ref `elixir-planning` §4.7.5, `architecture-patterns.md` §4.12.8. | Suggest | 6.102 EncoderWithoutDecoder |
+| Module with `defstruct` + smart constructor (`validate`/`parse`/`build`/`new` returning `{:ok, %__MODULE__{}}`) + functions taking `%__MODULE__{}` as input | Consider phantom types: split into `%UnverifiedEmail{}` (raw input) and `%Email{}` (validated). Consumers signed for `%Email{}` are statically guaranteed validated. Defensive answer: keep the single struct + add a property test asserting validate's invariant. Cross-ref `elixir-planning/architecture-patterns.md` §4.12.8. | Suggest (judgment-soft); Request-change only if validation is non-trivial AND consumers should not accept raw input | 6.103 PhantomTypeOpportunity |
+| `with` chain ≥7 `<-` clauses in one function | Architectural drift signal. 2–4 healthy, 5–6 approaching limit, 7+ split into named phases (smaller `with` chains called sequentially). Long chains hide the call graph. Cross-ref `elixir-implementing` §5.10.4. | Request-change | n/a (judgment) |
+| `with` `else` clause that handles success values, OR catch-all `else` clauses re-raising errors (`else x -> x`) | Bare `with` (no `else`) is the LCO-safe railway form — errors propagate transparently. Add `else` ONLY to translate error shapes for callers; never to handle success. Catch-all `else` adds nothing the bare form doesn't already do. Cross-ref `elixir-implementing` §5.10.1, §5.10.2. | Request-change for new code; Suggest for legacy | n/a (idiom) |
+| Building-block-flavored function (per axes 1–6) with capabilities read inline (`DateTime.utc_now`, `:rand.uniform`, `Application.get_env`, `:persistent_term.get`) | Pass the capability as an argument. For 2+ capabilities, bundle into a `ctx` struct threaded through the call chain. The orchestrator resolves and provides the capability. Cross-ref `elixir-implementing` §5.10.8, `elixir-planning` rule 22c. | Request-change for modules claiming building-block status; Suggest otherwise | n/a (related to 5.74) |
+
+### 7.13 Building-block module review
+
+Full reference: `elixir-planning/building-blocks.md`. Modules that claim building-block status (via `@moduledoc`) — or modules that the diff intends to make building-block-shaped — get reviewed against the seven-axis checklist. Each axis is binary: pass or fail.
+
+**The seven axes:**
+
+| Axis | Means | Failed when... |
+|---|---|---|
+| 1. Input closure | Output is a function of arguments only | Reads `Application.get_env`, `DateTime.utc_now`, `:rand.uniform`, `:persistent_term.get`, `Process.get`, `:ets.lookup` (anything not in the parameter list) |
+| 2. Determinism | Same inputs → same outputs | Same as axis 1 — usually overlap |
+| 3. `@spec` | Public functions have type contracts | Missing `@spec` on a public function |
+| 4. Totality | Function returns for every input in the documented domain | Raises on inputs the spec accepts; or accepts inputs not documented |
+| 5. Side-effect freedom | No observable effect besides the return value | Calls `Logger.*`, `Phoenix.PubSub.broadcast`, `Repo.insert/update/delete`, `:telemetry.execute`, `:ets.insert`, `:persistent_term.put`, sends messages, writes files |
+| 6. Errors as values | Failures returned as `{:error, _}`, not raised | `raise` for an expected failure (e.g., not-found, invalid format); use `!` variant if raise is intended |
+| 7. Input guard | Input domain narrowed by guards / pattern match / changeset / `Ecto.Enum` | Public function accepting `term()` or unconstrained `map()` without runtime validation |
+
+**What to flag in review:**
+
+| If you see... | Severity | Archdo rule |
+|---|---|---|
+| Module with `@moduledoc "Building block ..."` (or matching `@moduledoc "building-block ..."`) AND a `Logger.*` / `Phoenix.PubSub.*` / `Repo.*` / `:telemetry.execute` / `:ets.insert` / `:persistent_term.put` call inside any function body | Block — the moduledoc is lying. Either remove the side effect (extract to orchestrator) OR remove the building-block claim. Pure logic + side effects in one module is the textbook anti-pattern. Cross-ref `elixir-planning/building-blocks.md` §3.1 axis 5. | 5.74 InlineEffectInBuildingBlock |
+| Building-block module with expensive call (`Regex.compile!`, `Jason.decode!`, `:crypto.hash`, `DateTime.from_iso8601`) on a literal argument inside a function body | Suggest — hoist to a module attribute (`@valid_re Regex.compile!("^[a-z]+$")`). The expensive work should run once at compile time, not every call. For boot-time large values use `:persistent_term.put`. Cross-ref `elixir-implementing` §9.13, `elixir-planning` §4.7.8. | 5.75 MemoizeOpportunity |
+| Building-block module with public functions that lack `@spec` | Request-change — building-block status implies a contract. `@spec` IS the contract. | n/a (axis 3) |
+| Building-block module with public function that takes an unconstrained `term()` / `any()` without guard or pattern-match narrowing | Request-change — input guard is axis 7. A function whose input domain is unbounded cannot be property-tested. | n/a (axis 7) |
+| Building-block module with `raise` on an expected failure path (not bang variant) | Request-change — return `{:error, reason}`. Raises break axis 6 (errors-as-values). The `!` variant is for the explicit-raise contract. | n/a (axis 6) |
+| Module that mixes obvious building-block functions (pure transforms) with obvious orchestrator functions (DB writes, PubSub, HTTP) — no `@moduledoc` classification, no boundary | Suggest — split into `MyApp.Pricing` (building block) + `MyApp.Pricing.Workflow` (orchestrator). Mixing the two in one module fails Archdo's `Blackbox` analyzer (CE-54..57) and makes property-testing impossible. Cross-ref `elixir-planning` rule 11b, `building-blocks.md` §3.5. | Suggest (architectural) | n/a (CE-54 BlackboxQuadrant) |
+| New module added without classification (no `@moduledoc` indicating `building_block` / `orchestrator` / `interface`) | Suggest — explicit classification clarifies what the module is FOR. The `@moduledoc` doesn't have to literally use those words, but the description should make the type clear ("Pure pricing functions", "Orchestrates checkout flow", "LiveView for the cart"). | Suggest | n/a (rule 11b) |
+
+**Severity calibration**: a building-block claim is a *contract*. Breaking it is request-change minimum, block if the claim is load-bearing for property tests or downstream reasoning. A module without the claim isn't held to these rules — only flagged if it would obviously benefit from being one.
+
+### 7.14 LiveView async / CPS review
+
+Full reference: `phoenix-liveview/SKILL.md` "Async as Continuation-Passing Style". A LiveView is a single GenServer per user session. Synchronous work in `handle_event/3` freezes the session — clicks queue, the UI feels unresponsive, and a single slow API call hangs the whole user.
+
+| If you see... | Suggest instead | Severity | Archdo rule |
+|---|---|---|---|
+| `handle_event/3` calling `Req.get/post/...` / `HTTPoison.*` / `Tesla.*` / `Finch.request` / `:httpc.request` synchronously | Wrap with `start_async/3` + `handle_async/3`. The handler returns `{:noreply, start_async(socket, :name, fn -> work end)}` and a separate `handle_async(:name, {:ok, result}, socket)` callback receives the result. LV stays responsive throughout. | Block (production smell) | 5.76 InlineHttpInLiveViewEvent |
+| `handle_event/3` calling a long-running `Repo.*` query (full-table scan, complex aggregation) without `start_async` | Same fix as above. `Repo.transaction` / `Repo.all` on slow queries blocks the LV identically to HTTP. | Request-change | n/a |
+| `mount/3` doing blocking work without `connected?(socket)` guard | Move to `if connected?(socket), do: assign_async(socket, :data, ...)`. Mount runs twice (HTTP then WebSocket) — blocking work runs twice. The assign_async pattern handles both cleanly. | Request-change | n/a (LiveView rule 1) |
+| `start_async` lambda capturing the full `socket` | Capture only what the lambda needs: `id = socket.assigns.user_id; start_async(socket, :load, fn -> Accounts.get(id) end)`. Capturing the socket pulls all assigns into the spawned process; if any contain large data (streams, big lists), memory bloats. | Request-change for LV with large assigns; Suggest otherwise | n/a |
+| `assign_async`/`start_async` result rendered without `<.async_result>` wrapper for loading/error states | Use `<.async_result :let={data} assign={@data}>` with `<:loading>` and `<:failed>` slots. Direct rendering shows nothing during load, breaks on error. | Request-change | n/a |
+| `handle_async/3` callback discarding `{:exit, reason}` (only handling `{:ok, result}`) | Add the failure clause: `def handle_async(:name, {:exit, reason}, socket)` — otherwise `Process.exit` from the spawned task is unhandled. Crash flows back as an error tuple, not an unhandled exit. | Request-change | n/a |
+
+**Why this matters more than other "async" review**: LiveView's single-process-per-session shape makes blocking visible to the user immediately. A 2-second HTTP call in a controller is a 2-second response; a 2-second HTTP call in a LiveView `handle_event` is a 2-second freeze where every other click queues. The blast radius is one user, but the perception is "the app is broken."
 
 ---
 
@@ -1247,6 +1319,213 @@ def fetch(id), do: ...
 def fetch(id), do: ...
 ```
 
+### 11.10 Replace short-circuit `with` chain with error-accumulating reduce
+
+```elixir
+# BEFORE — short-circuit on first error; user fixes one field, resubmits, sees next error
+def validate_signup(params) do
+  with {:ok, email} <- validate_email(params),
+       {:ok, password} <- validate_password(params),
+       {:ok, age} <- validate_age(params) do
+    {:ok, %{email: email, password: password, age: age}}
+  end
+end
+
+# AFTER — accumulate errors so the user fixes everything in one pass
+def validate_signup(params) do
+  [
+    {:email, &validate_email/1},
+    {:password, &validate_password/1},
+    {:age, &validate_age/1}
+  ]
+  |> Enum.reduce({%{}, []}, fn {key, validator}, {fields, errors} ->
+    case validator.(params) do
+      {:ok, value} -> {Map.put(fields, key, value), errors}
+      {:error, reason} -> {fields, [{key, reason} | errors]}
+    end
+  end)
+  |> case do
+    {fields, []} -> {:ok, fields}
+    {_, errors} -> {:error, Enum.reverse(errors)}
+  end
+end
+```
+
+### 11.11 Hoist expensive call to module attribute
+
+```elixir
+# BEFORE — Regex.compile! runs on every call
+def valid_handle?(input) do
+  rx = Regex.compile!("^[a-z][a-z0-9_]{2,15}$")
+  Regex.match?(rx, input)
+end
+
+# AFTER — compile once at module load
+@valid_handle_re Regex.compile!("^[a-z][a-z0-9_]{2,15}$")
+def valid_handle?(input), do: Regex.match?(@valid_handle_re, input)
+```
+
+### 11.12 Wrap blocking HTTP in `start_async/3` + `handle_async/3`
+
+```elixir
+# BEFORE — LV freezes for the duration of the HTTP call
+def handle_event("fetch_users", _params, socket) do
+  {:ok, response} = Req.get("https://api.example.com/users")
+  {:noreply, assign(socket, :users, response.body)}
+end
+
+# AFTER — LV stays responsive; result delivered via handle_async
+def handle_event("fetch_users", _params, socket) do
+  {:noreply,
+   start_async(socket, :fetch_users, fn ->
+     Req.get!("https://api.example.com/users").body
+   end)}
+end
+
+def handle_async(:fetch_users, {:ok, users}, socket) do
+  {:noreply, assign(socket, :users, users)}
+end
+
+def handle_async(:fetch_users, {:exit, reason}, socket) do
+  {:noreply, put_flash(socket, :error, "Failed to load users: #{inspect(reason)}")}
+end
+```
+
+### 11.13 Convert nested `Map.update` / `Map.put` to `update_in` / `put_in`
+
+```elixir
+# BEFORE — nested lambdas obscure the path
+Map.update(state, :counts, %{}, fn counts ->
+  Map.put(counts, :total, 1)
+end)
+
+# AFTER — Access path makes the structure explicit
+put_in(state, [:counts, :total], 1)
+
+# BEFORE — two-level update with computed value
+Map.update(state, :a, %{}, fn a ->
+  Map.update(a, :b, 0, fn n -> n + 1 end)
+end)
+
+# AFTER
+update_in(state, [:a, :b], &(&1 + 1))
+```
+
+### 11.14 Reorder args to subject-first
+
+```elixir
+# BEFORE — opts first; pipe composition broken
+def discount(opts, price) do
+  rate = Keyword.fetch!(opts, :rate)
+  price * (1 - rate)
+end
+
+# Caller has to use `then/2` or split:
+total = then(price, &discount(opts, &1))
+
+# AFTER — subject first
+def discount(price, opts) do
+  rate = Keyword.fetch!(opts, :rate)
+  price * (1 - rate)
+end
+
+# Caller pipes naturally:
+total = price |> discount(opts)
+```
+
+### 11.15 Thread builder via pipes instead of rebinding
+
+```elixir
+# BEFORE — imperative-flavored rebinding
+def transfer_with_audit(from, to, amount, user_id) do
+  multi = Ecto.Multi.new()
+  multi = Ecto.Multi.update(multi, :debit, debit_changeset(from, amount))
+  multi = Ecto.Multi.update(multi, :credit, credit_changeset(to, amount))
+  multi = Ecto.Multi.insert(multi, :audit, audit_changeset(user_id, from, to, amount))
+  Repo.transaction(multi)
+end
+
+# AFTER — threading-builder shape
+def transfer_with_audit(from, to, amount, user_id) do
+  Ecto.Multi.new()
+  |> Ecto.Multi.update(:debit, debit_changeset(from, amount))
+  |> Ecto.Multi.update(:credit, credit_changeset(to, amount))
+  |> Ecto.Multi.insert(:audit, audit_changeset(user_id, from, to, amount))
+  |> Repo.transaction()
+end
+```
+
+### 11.16 Extract effect to orchestrator (preserve building-block purity)
+
+```elixir
+# BEFORE — building-block module emits side effect inline
+defmodule MyApp.Pricing do
+  @moduledoc "Building block: pure pricing functions."
+  require Logger
+
+  def discount(price, rate) do
+    Logger.info("calculating discount: rate=#{rate}")
+    price * (1 - rate)
+  end
+end
+
+# AFTER — building-block stays pure; orchestrator emits the effect
+defmodule MyApp.Pricing do
+  @moduledoc "Building block: pure pricing functions."
+  def discount(price, rate), do: price * (1 - rate)
+end
+
+defmodule MyApp.Pricing.Workflow do
+  @moduledoc "Orchestrates pricing — emits telemetry, persists, broadcasts."
+  require Logger
+  alias MyApp.Pricing
+
+  def apply_discount(price, rate) do
+    Logger.info("calculating discount: rate=#{rate}")
+    Pricing.discount(price, rate)
+  end
+end
+```
+
+### 11.17 Replace `Enum.*` chain with `Stream.*` over a streamy source
+
+```elixir
+# BEFORE — fully materializes the file even though we only count
+def count_errors(path) do
+  path
+  |> File.stream!()
+  |> Enum.map(&String.trim/1)
+  |> Enum.filter(&String.contains?(&1, "ERROR"))
+  |> Enum.count()
+end
+
+# AFTER — constant memory regardless of file size
+def count_errors(path) do
+  path
+  |> File.stream!()
+  |> Stream.map(&String.trim/1)
+  |> Stream.filter(&String.contains?(&1, "ERROR"))
+  |> Enum.count()
+end
+```
+
+### 11.18 Replace manual list-fold recursion with `Enum.reduce`
+
+```elixir
+# BEFORE — two-clause private function that's a fold in disguise
+def total(transactions), do: do_sum(transactions, Decimal.new(0))
+
+defp do_sum([], acc), do: acc
+defp do_sum([%{amount: amt} | rest], acc), do: do_sum(rest, Decimal.add(acc, amt))
+
+# AFTER — one line, named primitive
+def total(transactions) do
+  Enum.reduce(transactions, Decimal.new(0), fn %{amount: amt}, acc ->
+    Decimal.add(acc, amt)
+  end)
+end
+```
+
 ---
 
 ## 12. Review Comment Style
@@ -1431,8 +1710,9 @@ check stops paying for itself.
 
 ### Elixir family
 
-- **[elixir-planning](../elixir-planning/SKILL.md)** — architectural decisions (what to build, how to structure). This skill (`elixir-reviewing`) references planning §14 for architectural anti-patterns.
-- **[elixir-implementing](../elixir-implementing/SKILL.md)** — writing idiomatic code. This skill cross-references implementing §7 (anti-patterns Claude produces), §8 (daily operations), §9 (OTP).
+- **[elixir-planning](../elixir-planning/SKILL.md)** — architectural decisions (what to build, how to structure). This skill (`elixir-reviewing`) references planning §14 for architectural anti-patterns and §4.7 for the composition design vocabulary (referenced from §7.12).
+- **[elixir-planning/building-blocks.md](../elixir-planning/building-blocks.md)** — the seven-axis building-block checklist. This skill (`elixir-reviewing`) references it from §1 rule 14, §3.3 checklist, and §7.13 building-block module review. Load when reviewing modules that claim building-block status or that fail Archdo's `Blackbox` rules (CE-54..57: BlackboxQuadrant, UntestedBuildingBlock, EffectLeak, UnguardedBuildingBlock).
+- **[elixir-implementing](../elixir-implementing/SKILL.md)** — writing idiomatic code. This skill cross-references implementing §7 (anti-patterns Claude produces), §8 (daily operations), §9 (OTP), §5.10 (composition patterns — the railway/accumulating/builder/lens templates), §9.13 (memoization templates).
 - **`elixir`** — the original comprehensive Elixir skill with many reference subfiles. See `debugging-profiling.md` for deeper debugging / profiling reference beyond what's here.
 - **`elixir-testing`** — deep testing reference (property-based, LiveView, channels, Oban testing, ExVCR, Wallaby). Useful when reviewing tests that go beyond the implementing skill's §4 coverage.
 
