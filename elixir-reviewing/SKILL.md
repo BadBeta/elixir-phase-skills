@@ -542,7 +542,7 @@ Full reference: `elixir-implementing` §5.10 (composition patterns), `elixir-pla
 | `with` chain (≥2 `<-`) inside `validate_*` / `import_*` / `bulk_*` / `check_*` function whose success body combines 2+ bound values into a struct/map | Replace with **error-accumulating reduce** — short-circuit gives bad UX (user fixes one field, resubmits, sees next error). Wrap each validator in a reducer that collects errors into a list; return `{:error, errors}` if non-empty. Cross-ref `elixir-implementing` §5.10.6, `elixir-planning` §4.7.2. | Request-change for form/UX-facing flows; Suggest for internal | 6.95 ShortCircuitOverAccumulating |
 | `case fetch() do {:ok, v} -> {:ok, transform(v)}; {:error, _} = e -> e end` (verbose Result.map) | `with {:ok, v} <- fetch(), do: {:ok, transform(v)}`, OR a `Result.map/2` helper if the shape recurs in 3+ places. The `case` shape buries the intent. | Suggest | 6.96 ResultMapOpportunity |
 | Public 2-arg function with first arg named `opts`/`options`/`config` and last arg looking like the data subject (named `data`/`list`/`map`/`subject` or destructured `%Schema{} = subject`) | Reorder to subject-first: `def fun(data, opts)`. The stdlib (`Enum.map(coll, fn)`, `String.replace(s, pat, rep)`) is rigorous; backwards order silently breaks every downstream pipeline. Renaming arguments is a 5-minute refactor that pays off forever. Cross-ref `elixir-implementing` §5.10.10. | Request-change in domain APIs; Suggest in adapters | 6.97 PipeSubjectPosition |
-| 2+ levels of nested `Map.update` / `Map.put` lambdas reaching into a known structure | `update_in(state, [:a, :b], &fn)` / `put_in(state, [:a, :b], v)`. Nested-lambda form obscures the path; `update_in` says it in one line and composes. Cross-ref `elixir-implementing` §5.10.9. | Suggest | 6.98 NestedMapUpdateAsUpdateIn |
+| 2+ levels of nested `Map.update` / `Map.put` lambdas reaching into a known structure | `update_in(state, [:a, :b], &fn)` / `put_in(state, [:a, :b], v)`. Nested-lambda form obscures the path; `update_in` says it in one line and composes. **Caveat 1**: `Map.update/4` with a non-trivial default (`Map.update(req, :body, %{name => v}, &Map.put(&1, name, v))`) cannot be replaced by `put_in` — `put_in` requires the path to already exist. Use `update_in` only when the path is guaranteed populated, OR keep `Map.update/4`. **Caveat 2**: Archdo 6.98 has FP class — flagging "two `Map.put` calls where the second is in the value-arg of the first" includes cases where they operate on DIFFERENT maps (`Map.put(outer, :k, Enum.reduce(xs, %{}, fn _, acc -> Map.put(acc, ...) end))`). Read the diagnostic, verify both `Map.put`s actually mutate the same structure. Cross-ref `elixir-implementing` §5.10.9. | Suggest | 6.98 NestedMapUpdateAsUpdateIn |
 | Pipeline starting with `File.stream!` / `Repo.stream` / `Stream.resource` / `Stream.unfold` followed by 3+ eager `Enum.*` steps | Replace intermediate `Enum.*` with `Stream.*`; only the terminal step (`reduce`/`count`/`into`) must be eager. Each eager step materializes the whole intermediate list, defeating the lazy producer. Order-of-magnitude memory difference on large inputs. Cross-ref `elixir-implementing` §5.10.11. | Request-change if input may be large; Suggest otherwise | 6.99 StreamOverEnumOpportunity |
 | Two-clause private function: `defp f([], acc), do: acc; defp f([h \| t], acc), do: f(t, transform(h, acc))` | `Enum.reduce(xs, init, fn h, acc -> transform(h, acc) end)` — or one of `reduce_while` / `map_reduce` / `flat_map_reduce` / `Enum.sum` / `Enum.frequencies` depending on shape. Manual recursion is only needed for non-fold shapes (tree traversal, mutual recursion). Cross-ref `elixir-implementing` §5.10.12. | Suggest | 6.100 ManualRecursionAsReduce |
 | 3+ consecutive `subject = Mod.fun(subject, ...)` rebindings to the same name (Multi/Conn/Socket/Changeset builder pattern) | Thread with pipes: `Mod.new() \|> Mod.fun1(...) \|> Mod.fun2(...)`. The rebind form is imperative-flavored — forces the reader to verify each line refers to the previous binding. Cross-ref `elixir-implementing` §5.10.13. | Suggest | 6.101 BuilderPatternNotThreaded |
@@ -1414,7 +1414,7 @@ end
 ### 11.13 Convert nested `Map.update` / `Map.put` to `update_in` / `put_in`
 
 ```elixir
-# BEFORE — nested lambdas obscure the path
+# BEFORE — nested lambdas obscure the path (path already exists)
 Map.update(state, :counts, %{}, fn counts ->
   Map.put(counts, :total, 1)
 end)
@@ -1430,6 +1430,23 @@ end)
 # AFTER
 update_in(state, [:a, :b], &(&1 + 1))
 ```
+
+**When `put_in` / `update_in` does NOT apply** — the source `Map.update/4`'s 3rd argument (initial-value-when-missing) is non-trivial:
+
+```elixir
+# This is NOT equivalent to put_in — the %{name => value} default fires
+# only when :body is missing from request, which put_in can't express:
+Map.update(request, :body, %{name => value}, &Map.put(&1, name, value))
+
+# OPTION A: keep the Map.update/4 form (genuinely cleanest when default matters)
+# — flag as "false-positive" on Archdo 6.98 if reviewers ask.
+
+# OPTION B: ensure the path is populated upstream, then use put_in
+request = Map.put_new(request, :body, %{})
+put_in(request, [:body, name], value)
+```
+
+The FP class for Archdo 6.98: two `Map.put`s where the second is in the *value* arg of the first but operates on a DIFFERENT map (e.g. `Map.put(outer, :key, Enum.reduce(xs, %{}, fn _, acc -> Map.put(acc, ...) end))` — `outer` and `acc` are independent). Read the diagnostic; only refactor when both `Map.put`s mutate the same structure.
 
 ### 11.14 Reorder args to subject-first
 
