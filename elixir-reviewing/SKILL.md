@@ -1563,6 +1563,23 @@ def total(transactions) do
 end
 ```
 
+**When `Enum.reduce` does NOT apply** — verified against production code:
+
+1. **3+ clauses with special-case handling** — e.g., `[], acc / [last], acc / [h | t], acc` where the last-element clause does something different (no separator, terminal marker). The `reduce` rewrite needs `Enum.with_index` or zip-with-tail tricks and is harder to read.
+   ```elixir
+   # Pleroma's build_csp_from_whitelist — last element has no leading space
+   defp build([], acc), do: acc
+   defp build([last], acc), do: [param(last) | acc]
+   defp build([head | tail], acc), do: build(tail, [[?\s, param(head)] | acc])
+   ```
+   Keep manual recursion when special-casing is real.
+
+2. **Macro-driven `defp` heads** — `for X <- @list do defp f([{unquote(X), _, _} | rest], acc) ...` dispatches on AST shape generated at compile time. `Enum.reduce` cannot pattern-match different shapes per element.
+
+3. **Mutual recursion** — `defp parse_doc / defp parse_para / defp parse_inline` calling each other based on token. Not a fold.
+
+Archdo 6.100 only flags the strict 2-clause `[], acc` + `[h | t], acc` pattern, which IS a clean fold. Verify the function actually has just two clauses before reaching for the refactor.
+
 ---
 
 ## 12. Review Comment Style
