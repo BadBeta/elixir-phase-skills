@@ -180,15 +180,20 @@ Tests-after is correct for a **very narrow** set: HEEx/EEx templates, CSS/stylin
 20. **ALWAYS use `%{struct | key: val}`** for struct updates, not `Map.put(struct, key, value)`. The update syntax raises on unknown keys, catching typos at compile time.
 21. **ALWAYS use the latest stable dependency versions** and follow the library's recommended `mix.exs` setup. Don't hand-craft configurations that would break the standard installation flow.
 22. **ALWAYS run `mix format`, `mix credo --strict`, and the test suite** before declaring a change done. Fix warnings; do not suppress them.
-23. **ALWAYS check the SSOT source before introducing a new magic literal.** Before you type `@timeout 5_000` in a module, or `%{role: "admin"}` in a changeset, or `Map.get(opts, :timeout, 30_000)` in a helper, grep the project for `config/config.exs` / `config/runtime.exs` / `lib/MY_APP/constants.ex` / any `MyApp.Config`-style module — if a name for this value already exists there, use it. If one doesn't but this value encodes a deliberate policy (timeout, retry count, role name, allowed set), add it THERE first and reference from here. Literals inline in business logic drift — the reviewing skill's SSOT litmus (*"if this fact changes, how many files do I have to update?"*) should answer 1, not N. Common Elixir SSOT homes: `config/*.exs` (for values that may change per environment), a dedicated `MyApp.Config` module (for values read on the hot path — see §10.5.1 `elixir-planning`), module `@attributes` (for values that are compile-time constants of a single module). The anti-slop `elixir-magic-literal-outside-config` check fires post-write as a backstop; this rule is the proactive version.
-24. **NEVER deserialize untrusted input via bare `:erlang.binary_to_term/1,2`.** ETF can instantiate any term — atoms, funs, pids — so on attacker-controlled bytes it is RCE-equivalent. Use `Plug.Crypto.non_executable_binary_to_term/2` (rejects funs/pids/refs at decode time) and pass `[:safe]` when atoms must already exist. For external payloads (HTTP body, message broker, file upload), prefer JSON + a typed DTO via `MyDTO.new/1` — see §5.11. Plug's session cookie store and Phoenix.Token both use the `non_executable_binary_to_term/2` wrapper; bare `:erlang.binary_to_term/1` does not appear in any production module of Plug or Phoenix.
-25. **NEVER call `Code.eval_string/1,2`, `Code.eval_quoted/1,2,3`, or `Code.compile_string/1,2` on runtime data.** These are build-time primitives (Mix tasks, code generators). On runtime input they are unconditionally RCE — there is no `:safe` form. Replace with a bounded command/plugin registry: a compile-time `@commands %{name => &Mod.fun/n}` map and `Map.fetch(@commands, name)` for dispatch. See §5.10. Phoenix, Plug, Plug.Crypto, Ecto, and Bandit do not call `Code.eval_*` from `lib/`; if the rule fires on a candidate edit, the edit is wrong.
-26. **NEVER call `apply(mod, fun, args)` where `mod` or `fun` can be reached by external input.** A variable module/function in `apply` whose value flows from `conn.params`, a channel message, an Oban job arg, or a GenServer message payload is a confused-deputy RCE primitive. Plug uses `apply(mod, fun, args)` extensively (`Plug.Parsers.JSON`, `Plug.RewriteOn`, `Plug.SSL`) — but mod/fun in those calls come from `init/1`-validated config tuples (`{module, function, args}`), never from request data. The rule is about taint: if the variable's source is config or a compile-time map, fine; if it can be reached by request input, replace with a bounded registry (§5.10).
-27. **ALWAYS propagate `Logger.metadata` across async boundaries.** `Logger.metadata` is documented as **process-local** (see Logger module docs): a process spawned via `Task.async`, `Task.Supervisor.start_child`, `Task.async_stream`, or `spawn_link` starts with empty metadata. Any log line or `:telemetry.execute/3` call from that process is missing the parent's `request_id`, `trace_id`, and `tenant_id` — the line becomes orphan in log search. Capture metadata before the async call, restore it inside the closure (see §5.12). For request-scope metadata setup, `Plug.RequestId` is the reference setter (`Logger.metadata([{logger_metadata_key, request_id}])`).
-28. **ALWAYS attach a safe `Inspect` rendering to every struct that carries a secret field.** Either `@derive {Inspect, only: [...]}` (listing the safe fields) before `defstruct`, OR `defimpl Inspect, for: __MODULE__` for full custom rendering. Without an override, crash dumps include process state in SASL reports, observer, and remote shells — every secret field is printed verbatim. The reference is `Plug.Conn`'s `defimpl Inspect` (`lib/plug/conn.ex`), which replaces `:secret_key_base` with `:...` before `Inspect.Any.inspect/2`. See §5.13.
-29. **NEVER include `__STACKTRACE__` in a value that crosses a response boundary** (Phoenix conn render, channel reply, GraphQL resolver result, JSON view, LiveView flash). Stacktraces leak the internal module structure of the application — private modules, line numbers, library versions, call paths. They are a roadmap for an attacker. Drain them via `Logger.error(Exception.format(:error, e, __STACKTRACE__))` or `:telemetry.execute/3` metadata; return a sanitized error tuple (`{:error, :payment_failed}`) which the boundary maps to a bounded response shape (`%{code: "payment_failed"}`). Reference: `Phoenix.Endpoint.RenderErrors.__catch__/5` captures `stack = __STACKTRACE__` and passes it to `instrument_render_and_send` (Logger / telemetry) — never to the response body. See §5.14.
-30. **NEVER leave `IO.inspect/1,2` or `dbg/0,1` in `lib/`.** Production lib code does not debug-print to stdout. Phoenix, Bandit, Plug.Crypto, and Guardian all have ZERO `IO.inspect` calls in their published `lib/`. The only legitimate lib-side appearances are: a deliberate public API that exposes `IO.inspect`-shape behaviour to users (e.g. `Ecto.Multi.inspect/3` is intentional), or `# IO.inspect ...` shapes inside doc comments. If you reach for `IO.inspect` while writing production code, you wanted `Logger.debug/info/warning` with structured metadata.
-31. **ALWAYS plan for event/command schema evolution from day one.** Once an event or command is persisted (event store) or exchanged across a versioned wire (Oban args, broker payloads), adding a field or renaming one is a breaking change against existing data. Pick ONE convention per project, write it down at planning time: (a) inline `:version` field on every event struct, OR (b) `defimpl Commanded.Event.Upcaster, for: MyEvent` that transforms older persisted shapes into the current shape in place. The Commanded-shape uses **one event module per type** (NOT separate `V1.OrderPlaced` / `V2.OrderPlaced` modules) — the upcaster fills in defaults for missing fields when an older event is read. See §5.15.
+23. **ALWAYS treat `with` chains as Elixir's railway.** When a function performs 2+ ok/error operations, the `with` chain is the railway-oriented form: each `<-` is a track switch, the success path is straight-line, and a failure at any step short-circuits with that step's error returned unchanged. **PREFER bare `with`** (no `else`) — it propagates errors transparently and stays LCO-safe. **Add `else` ONLY** to translate error shapes for callers; never to handle the success case. When multiple steps return the same `{:error, _}` shape and you need to know which step failed, use the **tagged-tuple `with`** pattern (`{:fetch, {:ok, x}} <- {:fetch, fetch(id)}`). Chain length signals architectural drift: 2–4 steps healthy, 5–6 approaching limit, 7+ split into named phases. See §5.10.1–§5.10.4 for the templates.
+24. **ALWAYS distinguish short-circuit (`with`) from accumulating validation.** `with` short-circuits on first error — correct for sequentially-dependent operations. For independent validations whose errors should ALL be reported (form fields, batch import, multi-rule check), use the **error-accumulating reduce** pattern from §5.10.6, not `with`. Anti-pattern: form validation that uses `with` so the user fixes one field, resubmits, sees the next error, fixes it, resubmits, etc. — accumulate instead.
+25. **ALWAYS pass capabilities (clock, random, config, secrets) as arguments — NEVER read them inside building-block functions.** A building-block that calls `DateTime.utc_now/0`, `Application.get_env/2`, `:rand.uniform/0`, or `:persistent_term.get/1` fails axis 1 (input closure) of the building-block checklist. Take the value as an argument; let the orchestrator resolve it at call time. Bundle multiple capabilities into a `ctx` struct when the count exceeds 2 (§5.10.8). Behaviour-based DI is a degenerate form of capability passing: appropriate for 2–3 implementations chosen at boot, not for 5+ runtime-varying capabilities.
+26. **ALWAYS keep the data (subject) as the FIRST argument in public functions.** This is the foundation of pipeline composition. `def discount(price, rate)` not `def discount(rate, price)`. The stdlib observes this rigorously (`Enum.map(coll, fn)`, `String.replace(s, pat, rep)`, `Map.put(map, k, v)`). Configuration / opts go last. Functions on pairs go: both subjects first, then opts (`Map.merge(a, b, conflict_fn)`). A non-subject-first function silently breaks every downstream pipeline; renaming arguments is a 5-minute refactor that pays off forever (§5.10.10).
+27. **PREFER `update_in` / `put_in` / `get_in` over nested `Map.update` / `Map.put` chains.** Two levels of nested update is the threshold; beyond that, an Access path is more readable and composable (§5.10.9). For domain structs that need deep updates, either `defimpl Access` or split the operation across helpers. Reach for `Pathex` / `Focus` only when paths are dynamic or 5+ levels deep — the threshold is high; `update_in` covers most cases.
+28. **ALWAYS check the SSOT source before introducing a new magic literal.** Before you type `@timeout 5_000` in a module, or `%{role: "admin"}` in a changeset, or `Map.get(opts, :timeout, 30_000)` in a helper, grep the project for `config/config.exs` / `config/runtime.exs` / `lib/MY_APP/constants.ex` / any `MyApp.Config`-style module — if a name for this value already exists there, use it. If one doesn't but this value encodes a deliberate policy (timeout, retry count, role name, allowed set), add it THERE first and reference from here. Literals inline in business logic drift — the reviewing skill's SSOT litmus (*"if this fact changes, how many files do I have to update?"*) should answer 1, not N. Common Elixir SSOT homes: `config/*.exs` (for values that may change per environment), a dedicated `MyApp.Config` module (for values read on the hot path — see §10.5.1 `elixir-planning`), module `@attributes` (for values that are compile-time constants of a single module). The anti-slop `elixir-magic-literal-outside-config` check fires post-write as a backstop; this rule is the proactive version.
+29. **NEVER deserialize untrusted input via bare `:erlang.binary_to_term/1,2`.** ETF can instantiate any term — atoms, funs, pids — so on attacker-controlled bytes it is RCE-equivalent. Use `Plug.Crypto.non_executable_binary_to_term/2` (rejects funs/pids/refs at decode time) and pass `[:safe]` when atoms must already exist. For external payloads (HTTP body, message broker, file upload), prefer JSON + a typed DTO via `MyDTO.new/1` — see §5.12. Plug's session cookie store and Phoenix.Token both use the `non_executable_binary_to_term/2` wrapper; bare `:erlang.binary_to_term/1` does not appear in any production module of Plug or Phoenix.
+30. **NEVER call `Code.eval_string/1,2`, `Code.eval_quoted/1,2,3`, or `Code.compile_string/1,2` on runtime data.** These are build-time primitives (Mix tasks, code generators). On runtime input they are unconditionally RCE — there is no `:safe` form. Replace with a bounded command/plugin registry: a compile-time `@commands %{name => &Mod.fun/n}` map and `Map.fetch(@commands, name)` for dispatch. See §5.11. Phoenix, Plug, Plug.Crypto, Ecto, and Bandit do not call `Code.eval_*` from `lib/`; if the rule fires on a candidate edit, the edit is wrong.
+31. **NEVER call `apply(mod, fun, args)` where `mod` or `fun` can be reached by external input.** A variable module/function in `apply` whose value flows from `conn.params`, a channel message, an Oban job arg, or a GenServer message payload is a confused-deputy RCE primitive. Plug uses `apply(mod, fun, args)` extensively (`Plug.Parsers.JSON`, `Plug.RewriteOn`, `Plug.SSL`) — but mod/fun in those calls come from `init/1`-validated config tuples (`{module, function, args}`), never from request data. The rule is about taint: if the variable's source is config or a compile-time map, fine; if it can be reached by request input, replace with a bounded registry (§5.11).
+32. **ALWAYS propagate `Logger.metadata` across async boundaries.** `Logger.metadata` is documented as **process-local** (see Logger module docs): a process spawned via `Task.async`, `Task.Supervisor.start_child`, `Task.async_stream`, or `spawn_link` starts with empty metadata. Any log line or `:telemetry.execute/3` call from that process is missing the parent's `request_id`, `trace_id`, and `tenant_id` — the line becomes orphan in log search. Capture metadata before the async call, restore it inside the closure (see §5.13). For request-scope metadata setup, `Plug.RequestId` is the reference setter (`Logger.metadata([{logger_metadata_key, request_id}])`).
+33. **ALWAYS attach a safe `Inspect` rendering to every struct that carries a secret field.** Either `@derive {Inspect, only: [...]}` (listing the safe fields) before `defstruct`, OR `defimpl Inspect, for: __MODULE__` for full custom rendering. Without an override, crash dumps include process state in SASL reports, observer, and remote shells — every secret field is printed verbatim. The reference is `Plug.Conn`'s `defimpl Inspect` (`lib/plug/conn.ex`), which replaces `:secret_key_base` with `:...` before `Inspect.Any.inspect/2`. See §5.14.
+34. **NEVER include `__STACKTRACE__` in a value that crosses a response boundary** (Phoenix conn render, channel reply, GraphQL resolver result, JSON view, LiveView flash). Stacktraces leak the internal module structure of the application — private modules, line numbers, library versions, call paths. They are a roadmap for an attacker. Drain them via `Logger.error(Exception.format(:error, e, __STACKTRACE__))` or `:telemetry.execute/3` metadata; return a sanitized error tuple (`{:error, :payment_failed}`) which the boundary maps to a bounded response shape (`%{code: "payment_failed"}`). Reference: `Phoenix.Endpoint.RenderErrors.__catch__/5` captures `stack = __STACKTRACE__` and passes it to `instrument_render_and_send` (Logger / telemetry) — never to the response body. See §5.15.
+35. **NEVER leave `IO.inspect/1,2` or `dbg/0,1` in `lib/`.** Production lib code does not debug-print to stdout. Phoenix, Bandit, Plug.Crypto, and Guardian all have ZERO `IO.inspect` calls in their published `lib/`. The only legitimate lib-side appearances are: a deliberate public API that exposes `IO.inspect`-shape behaviour to users (e.g. `Ecto.Multi.inspect/3` is intentional), or `# IO.inspect ...` shapes inside doc comments. If you reach for `IO.inspect` while writing production code, you wanted `Logger.debug/info/warning` with structured metadata.
+36. **ALWAYS plan for event/command schema evolution from day one.** Once an event or command is persisted (event store) or exchanged across a versioned wire (Oban args, broker payloads), adding a field or renaming one is a breaking change against existing data. Pick ONE convention per project, write it down at planning time: (a) inline `:version` field on every event struct, OR (b) `defimpl Commanded.Event.Upcaster, for: MyEvent` that transforms older persisted shapes into the current shape in place. The Commanded-shape uses **one event module per type** (NOT separate `V1.OrderPlaced` / `V2.OrderPlaced` modules) — the upcaster fills in defaults for missing fields when an older event is read. See §5.16.
 
 ---
 
@@ -272,9 +277,15 @@ This is the single most important section to consult at the moment of writing. E
 | Wrap an external library that raises | `try/rescue` at the adapter boundary, convert to ok/error | Let exceptions leak out of your context |
 | Propagate unknown errors | Let them crash; supervisor restarts | Catch-all `rescue _` |
 | Decode an ETF (`:erlang.term_to_binary`) payload from another node or signed cookie | `Plug.Crypto.non_executable_binary_to_term(payload, [:safe])` | Bare `:erlang.binary_to_term/1` (RCE class on attacker bytes) |
-| Decode a payload from outside the cluster (HTTP body, broker, upload) | JSON / Protobuf / explicit format + `MyDTO.new/1` (see §5.11) | Any form of `:erlang.binary_to_term` |
-| Dispatch on a string command from external input | `Map.fetch(@commands, name)` against a compile-time registry (see §5.10) | `apply(String.to_existing_atom(name), :run, args)` / `Code.eval_*` |
+| Decode a payload from outside the cluster (HTTP body, broker, upload) | JSON / Protobuf / explicit format + `MyDTO.new/1` (see §5.12) | Any form of `:erlang.binary_to_term` |
+| Dispatch on a string command from external input | `Map.fetch(@commands, name)` against a compile-time registry (see §5.11) | `apply(String.to_existing_atom(name), :run, args)` / `Code.eval_*` |
 | Need to invoke a function whose name is config-supplied | `apply(mod, fun, args)` is fine when `mod`/`fun` came from `init/1`-validated config (Plug pattern) | Same `apply` shape with `mod`/`fun` reaching from request params or channel messages |
+| Chain 2+ ok/error operations | Bare `with` (railway, no `else`) — §5.10.1 | Nested `case`, `if` |
+| Translate error shapes for callers | `with` + targeted `else` clauses — §5.10.2 | `else` that handles success values |
+| Distinguish which step failed when shapes overlap | Tagged-tuple `with` (`{:fetch, {:ok, x}} <- {:fetch, fn()}`) — §5.10.3 | Catch-all error and reverse-engineer the cause |
+| Validate independent fields, accumulate errors | Reduce that collects errors into a list — §5.10.6 | `with` (short-circuits — wrong UX for forms) |
+| Transform success value, leave error untouched | `with {:ok, v} <- f(), do: {:ok, transform.(v)}` — §5.10.5 | `case ... do {:ok, v} -> {:ok, transform.(v)}; e -> e end` |
+| Communicate "this should happen" without doing it | Return events list `{:ok, value, [events]}` — §5.10.7 | Inline `Logger`/`Repo`/`PubSub` from a building-block |
 
 ### 2.5 Strings and binaries
 
@@ -359,6 +370,8 @@ This is the single most important section to consult at the moment of writing. E
 | Inspect without changing value | `tap(&IO.inspect/1)` | Assign to var, inspect, reuse |
 | Transform for a single non-pipable step | `then/2`: `data \|> then(&some_fn.(&1, extra))` | Break pipeline, assign, call, re-enter |
 | Log / emit telemetry mid-pipeline | `tap(&Logger.info/1)` | Pipeline break |
+| Define a public function so callers can pipe into it | First arg = data; opts last (`def f(data, opts \\ [])`) — §5.10.10 | First arg = opts; data later (breaks every pipeline) |
+| Compose deep nested updates | `update_in(struct.a.b.c, &fn/1)` / `put_in/2` — §5.10.9 | Nested `Map.update` lambdas (>2 levels) |
 
 ### 2.11 Testing
 
@@ -1483,7 +1496,586 @@ Then make every `handle_info` that can change the row's appearance call `stream_
 
 This is one of the highest-impact LV gotchas — it often drives architectural rework (virtual field on the schema, `list_with_state/1` context function with `DISTINCT ON`, etc.). Design for it at planning time; don't discover it in a test failure.
 
-### 5.10 Bounded command/plugin registry — the safe replacement for runtime eval and dispatch
+### 5.10 Composition Patterns — `with` as Elixir's railway
+
+**Composition is how Elixir code becomes maintainable: small functions that snap together because their outputs and inputs match.** Five composition primitives map across most production code. Each has a canonical Elixir form — none of these requires a library; they're idiomatic uses of stdlib.
+
+**Building-blocks first, composition second.** Every pattern in this section delivers its full payoff only when the underlying functions are building-blocks (see `elixir-planning/building-blocks.md`): pure (axes 1–6) and input-guarded (axis 7). Composition over impure code wires functions together but doesn't deliver the property-test, memoize, or local-reasoning payoffs. The slogan: **build building-blocks, then COMPOSE them.** Concrete dependencies:
+
+- Railway / `with`-chain (§5.10.1) requires steps to return ok/error, never raise → axis 6 (errors-as-values).
+- `Result.map` / functor (§5.10.5) maps a pure transform → axes 1, 5, 6.
+- Applicative validation (§5.10.6) accumulates errors from independent pure validators → axes 1, 5, 6.
+- Effects-as-data (§5.10.7) is the *only* honest way for a building-block to communicate "this should happen" without doing it → axis 5.
+- Capability passing (§5.10.8) IS axis 1 (input closure) restated as a composition pattern.
+- Lens / `update_in` (§5.10.9) requires the update to be pure → axis 5.
+- Subject-position discipline (§5.10.10) is what makes building-block functions pipeable.
+
+If you find yourself reaching for one of these patterns and the surrounding module isn't a building-block, the answer is rarely "compose anyway" — it's usually "extract a building-block first" (§building-blocks.md §5 / §6.4).
+
+#### 5.10.1 Railway-Oriented `with` chain — the dominant pattern
+
+In F# / Haskell terminology, **railway-oriented programming** (Wlaschin) routes a value down a "success track" through a series of operations; the moment any step fails, the value drops to the "failure track" and skips the rest. Elixir's `with` IS the railway. Each `<-` arrow is a track switch:
+
+```elixir
+def register_user(attrs) do
+  with {:ok, valid_attrs}    <- validate(attrs),
+       {:ok, hashed_attrs}   <- hash_password(valid_attrs),
+       {:ok, user}           <- insert(hashed_attrs),
+       :ok                   <- send_welcome_email(user) do
+    {:ok, user}
+  end
+end
+```
+
+**Anatomy of the railway:**
+- Each `<-` is a step on the success track. If the LHS pattern matches the RHS, the chain continues with the bound value.
+- If ANY step's RHS doesn't match — typically because it returned `{:error, _}` — the `with` short-circuits. The non-matching value is the return value of the whole expression.
+- **Bare `with` (no `else`) propagates errors transparently.** This is the cleanest railway shape. Don't add an `else` unless you need to *transform* the error on the way out.
+- Mix step shapes: `{:ok, _}` for value-returning steps, `:ok` for confirmation-only steps. Both are valid railway stops.
+
+**Building-block prerequisite:** the railway only works because each step returns ok/error tuples and never raises. That's axis 6 of the building-block checklist (`elixir-planning/building-blocks.md` §3.1). If a step in your chain raises on failure (e.g., a non-bang function that internally calls `Repo.one!`), the railway derails: the raise blows past `with` and propagates as an exception. Either change the step to return `{:error, _}` or wrap it at a boundary with `try`/`rescue` that converts. Pure building-block steps make railways trustworthy; ad-hoc impure steps make them brittle.
+
+**Why bare `with` is preferred:**
+- No mental overhead reading the success path: it's straight-line.
+- LCO-safe — `with...else` rebinds the result for re-matching, breaking last-call optimization (idioms-reference.md §With Chains).
+- Errors from any step keep their original shape, which downstream callers pattern-match.
+
+#### 5.10.2 When to add `else` — transforming errors at the boundary
+
+Use `else` ONLY when downstream callers expect a specific error shape that internal steps don't produce. The `else` is an error translator:
+
+```elixir
+def public_api(input) do
+  with {:ok, parsed} <- Parser.parse(input),
+       {:ok, valid}  <- Validator.check(parsed),
+       {:ok, stored} <- Repo.insert(valid) do
+    {:ok, stored}
+  else
+    {:error, %Jason.DecodeError{}} -> {:error, :invalid_json}
+    {:error, %Ecto.Changeset{} = cs} -> {:error, errors_on(cs)}
+    # Other {:error, _} fall through unchanged
+  end
+end
+```
+
+The `else` only catches FAILURE-track values; success goes to the `do` block. Don't use `else` to handle success cases — that's a sign the chain has too many concerns; split it.
+
+#### 5.10.3 Tagged-tuple `with` — labeling which step failed
+
+When multiple steps return the same shape (`{:error, :not_found}` from any of three lookups), wrap each step in a tag tuple to distinguish:
+
+```elixir
+def transfer(from_id, to_id, amount) do
+  with {:from,  {:ok, from_acct}} <- {:from, Accounts.fetch(from_id)},
+       {:to,    {:ok, to_acct}}   <- {:to,   Accounts.fetch(to_id)},
+       {:funds, :ok}               <- {:funds, check_funds(from_acct, amount)},
+       {:tx,    {:ok, tx}}         <- {:tx, Ledger.post(from_acct, to_acct, amount)} do
+    {:ok, tx}
+  else
+    {:from, {:error, :not_found}}  -> {:error, :source_not_found}
+    {:to, {:error, :not_found}}    -> {:error, :dest_not_found}
+    {:funds, {:error, reason}}     -> {:error, {:funds, reason}}
+    {:tx, {:error, _} = err}       -> err
+  end
+end
+```
+
+The tag is the step name; the `else` translates by step. This is the Elixir adaptation of Wlaschin's "two-track functions with named lanes" — it lets the failure track carry which switch threw it.
+
+#### 5.10.4 Chain length signals architectural drift
+
+| Chain length | Diagnosis | Action |
+|---|---|---|
+| 2–4 steps | Healthy railway — keep as-is | None |
+| 5–6 steps | Approaching the limit | Look for sub-chain opportunities to extract as their own `with`-returning helper |
+| 7+ steps | The function is doing too much | Split into named phases (`prepare/1`, `commit/1`); orchestrator calls each |
+| Deep chains spanning Repo + HTTP + PubSub | Process orchestration smell | Consider Oban (durability), Saga (compensating actions), or event sourcing |
+
+**Rule of thumb:** if the chain contains a Repo write AND an HTTP call AND a PubSub broadcast, it's no longer a railway — it's an integration. Move it to an Oban worker (or a saga) so the failure track can compensate, not just abort.
+
+#### 5.10.5 Result.map / functor — single-step transforms inside the railway
+
+When a step's success value needs ONE transform applied with no further failure cases, `with` is the right tool — but the transform itself is a `Result.map`-shaped operation. Don't reach for an external library; use bare `with`:
+
+```elixir
+# BAD — verbose case mimicking case-of-Result
+def parse_count(input) do
+  case Integer.parse(input) do
+    {n, ""} -> {:ok, n * 2}
+    _ -> {:error, :invalid}
+  end
+end
+
+# GOOD — `with` clause expresses the same transform on the success track
+def parse_count(input) do
+  with {n, ""} <- Integer.parse(input) do
+    {:ok, n * 2}
+  end
+end
+
+# Or when chaining multiple maps:
+def normalize_and_double(input) do
+  with {:ok, n}   <- parse_int(input),
+       doubled    = n * 2,
+       {:ok, str} <- format(doubled) do
+    {:ok, str}
+  end
+end
+```
+
+The `=` clause inside `with` is a pure binding (no track switch — it always succeeds). Use it for "compute this from the success value" steps that don't fail.
+
+If a project has 5+ identical `case` patterns mimicking Result.map, define a project-local helper:
+
+```elixir
+defmodule MyApp.Result do
+  def map({:ok, v}, fun), do: {:ok, fun.(v)}
+  def map({:error, _} = e, _), do: e
+
+  def map_error({:error, e}, fun), do: {:error, fun.(e)}
+  def map_error({:ok, _} = ok, _), do: ok
+end
+```
+
+But prefer `with` chains when possible — they read closer to the railway and don't force a new vocabulary.
+
+#### 5.10.6 Applicative validation — accumulating errors instead of short-circuiting
+
+`with` is a **monadic** chain — it short-circuits on the first failure. For independent validations whose errors should ALL be reported (form validation, batch import, multi-field check), short-circuiting is the wrong semantics. Use a reduce-based accumulator:
+
+```elixir
+# BAD — short-circuits; user fixes one error, gets another, fixes that, gets another...
+def validate(attrs) do
+  with :ok <- check_email(attrs),
+       :ok <- check_password(attrs),
+       :ok <- check_age(attrs) do
+    {:ok, attrs}
+  end
+end
+
+# GOOD — accumulates; user sees all errors at once
+def validate(attrs) do
+  errors =
+    [
+      check_email(attrs),
+      check_password(attrs),
+      check_age(attrs)
+    ]
+    |> Enum.flat_map(fn
+      :ok -> []
+      {:error, e} -> [e]
+    end)
+
+  case errors do
+    [] -> {:ok, attrs}
+    errs -> {:error, errs}
+  end
+end
+```
+
+`Ecto.Changeset` does this implicitly — its `traverse_errors/2` accumulates field-level errors. When you control the validators, the explicit reduce pattern works.
+
+**Decision: short-circuit (`with`) vs accumulate (reduce):**
+
+| Use short-circuit `with` when... | Use accumulate-reduce when... |
+|---|---|
+| Each step depends on the previous step's value | Steps are independent (validate field A independently of B) |
+| Failure is rare (happy-path optimization) | Failure is common AND the user fixes errors interactively (forms) |
+| Cost of running a failed step is high (DB write, network call) | All steps are cheap (in-memory predicates) |
+| Aborting early is correct semantics (transactional) | "All errors at once" is the better UX |
+
+#### 5.10.7 Effects-as-data — return events, let the orchestrator emit
+
+A building-block (see elixir-planning building-blocks.md) doesn't emit side effects. But the building-block KNOWS what should happen — "this user should get a welcome email", "this metric should be incremented". The pattern: return the events as data; the orchestrator interprets:
+
+```elixir
+# Building-block: pure decision + event description
+defmodule MyApp.Accounts.Rules do
+  @moduledoc "Building block — decides what registration should do."
+
+  @spec register(map(), salt :: String.t()) ::
+          {:ok, Ecto.Changeset.t(), [event]} | {:error, :invalid}
+        when event: {:emit, atom(), map()} | {:send, atom(), map()}
+  def register(attrs, salt) do
+    cs = User.changeset(%User{}, Map.put(attrs, :salt, salt))
+
+    case cs.valid? do
+      true ->
+        events = [
+          {:emit, :user_registered, %{email: cs.changes.email}},
+          {:send, :welcome_email, %{email: cs.changes.email}}
+        ]
+        {:ok, cs, events}
+      false ->
+        {:error, :invalid}
+    end
+  end
+end
+
+# Orchestrator: drives the building-block, executes events
+defmodule MyApp.Accounts.Registration do
+  alias MyApp.Accounts.Rules
+  alias MyApp.{Repo, Mailer}
+
+  def register(attrs) do
+    with salt <- Bcrypt.gen_salt(),
+         {:ok, cs, events} <- Rules.register(attrs, salt),
+         {:ok, user} <- Repo.insert(cs) do
+      Enum.each(events, &dispatch/1)
+      {:ok, user}
+    end
+  end
+
+  defp dispatch({:emit, name, payload}), do: :telemetry.execute([:accounts, name], %{}, payload)
+  defp dispatch({:send, :welcome_email, %{email: email}}), do: Mailer.deliver_welcome(email)
+end
+```
+
+**Why this matters:**
+- The building-block (`Rules`) is property-test-friendly: assert that valid input produces the expected events list.
+- The orchestrator's responsibility shrinks to "run the rules, persist, dispatch events" — itself testable with a captured-events mock.
+- Events are first-class values: log them, audit them, replay them. This is the writer-monad pattern from FP, adapted naturally to Elixir.
+
+When NOT to use this: when there's exactly one effect and it's transactional (e.g., insert+nothing-else). The events list is overhead for trivial cases.
+
+#### 5.10.8 Capability passing — effects as arguments, not globals
+
+A building-block that needs `now()`, `Application.get_env`, or a random salt fails axis 1 (input closure) of the building-block checklist. The fix: take the capability as an argument. The orchestrator resolves the capability at call time:
+
+```elixir
+# BAD — hidden capability (axis 1 fail)
+def calculate_due_date(invoice), do: Date.add(invoice.issued_on, Application.get_env(:my_app, :net_days))
+
+# GOOD — capability is an argument
+@spec calculate_due_date(Invoice.t(), pos_integer()) :: Date.t()
+def calculate_due_date(invoice, net_days), do: Date.add(invoice.issued_on, net_days)
+
+# Orchestrator resolves it:
+def issue(invoice) do
+  net_days = Application.fetch_env!(:my_app, :net_days)
+  Calculations.calculate_due_date(invoice, net_days)
+end
+```
+
+For functions that need MULTIPLE capabilities (clock, random, config), bundle them into a `ctx` struct or keyword:
+
+```elixir
+defmodule MyApp.Clock.Ctx do
+  defstruct [:now, :rand, :id_gen]
+
+  def real do
+    %__MODULE__{
+      now:    &DateTime.utc_now/0,
+      rand:   &:rand.uniform/0,
+      id_gen: &Ecto.UUID.generate/0
+    }
+  end
+
+  def deterministic(now, seed) do
+    :rand.seed(:exsss, {seed, seed, seed})
+    %__MODULE__{now: fn -> now end, rand: &:rand.uniform/0, id_gen: fn -> "test-#{seed}" end}
+  end
+end
+
+# Building-block takes ctx:
+def schedule(task, %Clock.Ctx{} = ctx), do: %{task | scheduled_at: ctx.now.()}
+
+# Test passes deterministic ctx:
+test "schedules at the supplied time" do
+  ctx = Clock.Ctx.deterministic(~U[2026-05-06 12:00:00Z], 42)
+  task = Schedule.schedule(%Task{}, ctx)
+  assert task.scheduled_at == ~U[2026-05-06 12:00:00Z]
+end
+```
+
+Capability passing makes the function a Reader monad in disguise: `ctx -> result` where `ctx` carries everything formerly hidden. Behaviour-based DI (config-pick the implementation per environment) is a degenerate form — useful when there are 2–3 implementations chosen at boot, not many.
+
+#### 5.10.9 Lens / `update_in` — composing nested updates
+
+For deep struct/map updates, manual `Map.update` chains stop reading well past two levels. Use `update_in` / `put_in` with an Access path:
+
+```elixir
+# BAD — manual nested update; the path is buried in the lambda
+order =
+  Map.update(order, :customer, %{}, fn customer ->
+    Map.update(customer, :address, %{}, fn address ->
+      Map.put(address, :city, "Oslo")
+    end)
+  end)
+
+# GOOD — Access path expresses the depth declaratively
+order = put_in(order.customer.address.city, "Oslo")
+
+# With list traversal — Access.all/0
+orders = update_in(orders, [Access.all(), :total], &Decimal.mult(&1, 1.25))
+
+# With find-by-id
+orders = update_in(orders, [Access.filter(&(&1.id == id)), :status], fn _ -> :paid end)
+```
+
+**When `update_in` doesn't fit:**
+- The path depends on a value at one of the levels (e.g., "find this customer's most recent order"): use `Enum.find_index` + `update_in` with `Access.at/1`, or step out into a helper.
+- The struct doesn't implement `Access` (most domain structs don't): either `defimpl Access` or fall back to manual updates. Phoenix params and Ecto changesets implement Access; your `defstruct` modules don't by default.
+
+For very deep / dynamic paths (10+ levels, computed paths), reach for `Pathex` or `Focus` — but the threshold is high; `update_in` covers >95% of cases.
+
+#### 5.10.10 Subject-position discipline — the rule that makes pipelines compose
+
+Every public function in a building-block module follows: **the data (the thing being transformed) is the FIRST argument; configuration is LAST.**
+
+```elixir
+# BAD — pipeline-hostile
+def discount(rate, price), do: # ...
+# Caller: cart.items |> Enum.map(fn item -> discount(0.10, item.price) end)
+# The pipeline can't put item.price in first-arg position.
+
+# GOOD — pipeline-friendly
+def discount(price, rate), do: # ...
+# Caller: cart.items |> Enum.map(&discount(&1.price, 0.10))
+# Or with a partial: cart.items |> Enum.map(&discount(&1.price, rate))
+```
+
+This is the foundation of pipeline composition. Stdlib observes it religiously: `Enum.map(coll, fn)`, `String.replace(s, pat, rep)`, `Map.put(map, k, v)`. Domain code should match.
+
+**Special cases:**
+- Functions that take an opts keyword take it last (`Module.fun(data, opts \\ [])`).
+- Functions on a *pair* of things (merge, intersect, append) take both first then opts (`Map.merge(a, b, conflict_fn)`).
+- Predicate functions on an enumerable take the enumerable first, the predicate second: `Enum.filter(coll, pred)`.
+
+If you find a function in your code where data isn't first, it WILL break someone's pipeline later. Renaming the function arguments is a 5-minute refactor that pays off forever.
+
+#### 5.10.11 Stream as lazy pipeline
+
+A `Stream` chain has the same shape as an `Enum` chain — `coll |> Stream.map(...) |> Stream.filter(...)` — but every step is *lazy*: nothing runs until a terminal `Enum.*` materializes the result. This makes Stream a distinct composition primitive (the 5th mechanism in `elixir-planning/SKILL.md` §4.7.1). Use it when the source is bounded-but-large, unbounded, or I/O-sourced.
+
+**When to choose Stream over Enum:**
+
+| Signal | Choice |
+|---|---|
+| Source is `File.stream!/1`, `Repo.stream/1,2`, `IO.stream/2`, `Stream.resource/3` | **Stream** — eager `Enum` materializes the whole list into memory |
+| Collection size is unknown (user data, log file, paginated API) | **Stream** — keeps memory bounded |
+| Pipeline ends with `Enum.take/2` or `Enum.find/2` (early termination) | **Stream** — avoids transforming elements you'll never read |
+| Collection size is known and small (≤ 1000 elements, fits in memory) | **Enum** — laziness adds overhead with no payoff |
+| Pipeline materializes all elements at the end (`Enum.to_list`, `Enum.sum`) | **Either** — Stream wins on memory, Enum wins on raw speed for small collections |
+
+**Canonical templates:**
+
+```elixir
+# Read-process-write pipeline — bounded memory regardless of file size:
+"input.csv"
+|> File.stream!()
+|> Stream.drop(1)                              # skip header
+|> Stream.map(&parse_csv_row/1)
+|> Stream.filter(&valid?/1)
+|> Stream.map(&transform/1)
+|> Stream.into(File.stream!("output.csv"))     # back to file (collectable)
+|> Stream.run()                                # materialize
+
+# Database iteration without loading the whole table:
+Repo.transaction(fn ->
+  Repo.stream(query, max_rows: 500)
+  |> Stream.chunk_every(100)
+  |> Stream.each(&process_batch/1)
+  |> Stream.run()
+end, timeout: :infinity)
+
+# Custom Stream from external source (Stream.resource/3):
+Stream.resource(
+  fn -> {:ok, conn} = Postgrex.start_link(opts); conn end,
+  fn conn ->
+    case Postgrex.query!(conn, "FETCH 100 FROM cur", []) do
+      %{rows: []} -> {:halt, conn}
+      %{rows: rows} -> {rows, conn}
+    end
+  end,
+  fn conn -> Postgrex.close(conn) end
+)
+
+# Corecursion via Stream.unfold/2 — generate values from a seed:
+Stream.unfold({0, 1}, fn {a, b} -> {a, {b, a + b}} end)
+|> Enum.take(10)
+# => [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]   (Fibonacci)
+```
+
+**Rules of thumb:**
+- A Stream chain MUST end with exactly one terminal `Enum.*` (or `Stream.run/1`, `Stream.into/2`). The terminal call is what *materializes* the lazy chain.
+- Side effects in `Stream.map/2`/`Stream.each/2` run AT MATERIALIZATION TIME — be explicit about when materialization happens.
+- `Stream.resource/3` is the parser's best friend for streaming external sources (file handles, DB cursors, network sockets).
+- `Stream.unfold/2` is corecursion: generate-from-seed. Pair with `Enum.take/2` to keep it bounded.
+
+**BAD/GOOD:**
+
+```elixir
+# BAD — eager Enum on streamed source materializes everything
+"huge.log"
+|> File.stream!()
+|> Enum.map(&parse/1)            # OOM on a 10GB log file
+|> Enum.filter(&error?/1)
+
+# GOOD — lazy chain keeps memory bounded
+"huge.log"
+|> File.stream!()
+|> Stream.map(&parse/1)
+|> Stream.filter(&error?/1)
+|> Enum.take(100)                # only the first 100 errors are parsed
+```
+
+Cross-reference: `idioms-reference.md` §Stream has the full operation table (`Stream.map`, `filter`, `flat_map`, `chunk_every`, `transform`, `iterate`, `cycle`, `with_index`, `dedup`, `take_while`, `drop_while`, `interval`, etc.).
+
+#### 5.10.12 Reduce as the universal fold
+
+Most `Enum.*` operations are special cases of `Enum.reduce/3`. When you find yourself writing manual recursion to walk a list, the answer is almost always one of the reduce variants. The variants distinguish themselves by what kind of state the fold accumulates.
+
+**Decision table for reduce variants:**
+
+| Need | Variant | Returns |
+|---|---|---|
+| Accumulate to one value | `Enum.reduce/3` | The final accumulator |
+| Halt early on a condition | `Enum.reduce_while/3` | The halt-or-final accumulator |
+| Transform each element + accumulate state in parallel | `Enum.map_reduce/3` | `{transformed_list, final_acc}` |
+| Each element produces 0..N outputs + thread state | `Enum.flat_map_reduce/3` | `{flat_list, final_acc}` |
+| Emit the running accumulator after each step (running totals) | `Enum.scan/2,3` | List of partial accumulators |
+| Pre-compute pairs while looping | `for x <- xs, reduce: acc do ... end` | The final acc |
+
+**Templates:**
+
+```elixir
+# reduce — fold to one value
+Enum.reduce(orders, Decimal.new(0), &Decimal.add(&2, &1.total))
+
+# reduce_while — early termination with halt
+Enum.reduce_while(items, [], fn item, acc ->
+  case validate(item) do
+    {:ok, v} -> {:cont, [v | acc]}
+    {:error, _} = e -> {:halt, e}
+  end
+end)
+
+# map_reduce — transform each element while threading state (e.g., assign IDs)
+Enum.map_reduce(rows, 1, fn row, id -> {%{row | id: id}, id + 1} end)
+
+# flat_map_reduce — each element produces multiple outputs (e.g., expand abbreviations)
+Enum.flat_map_reduce(words, 0, fn word, count ->
+  expansions = expand(word)
+  {expansions, count + length(expansions)}
+end)
+
+# scan — running totals; emits each intermediate accumulator
+Enum.scan([10, 5, 8, 3], &(&2 + &1))   # => [10, 15, 23, 26]
+
+# for ... reduce: — multi-accumulator with pattern matching in clause
+for x <- numbers, reduce: {[], []} do
+  {odds, evens} ->
+    case rem(x, 2) do
+      0 -> {odds, [x | evens]}
+      _ -> {[x | odds], evens}
+    end
+end
+```
+
+**BAD/GOOD — manual recursion that's really a reduce:**
+
+```elixir
+# BAD — reimplementing Enum.map via manual recursion
+defp double_all([]), do: []
+defp double_all([h | t]), do: [h * 2 | double_all(t)]
+
+# GOOD — Enum.map with a capture
+double_all(list), do: Enum.map(list, &(&1 * 2))
+
+# BAD — reimplementing Enum.reduce with accumulator
+defp sum_squares([], acc), do: acc
+defp sum_squares([h | t], acc), do: sum_squares(t, acc + h * h)
+
+# GOOD — Enum.reduce
+sum_squares(list), do: Enum.reduce(list, 0, &(&2 + &1 * &1))
+
+# BAD — manual recursion to filter+transform in one pass
+defp parse_lines([], acc), do: Enum.reverse(acc)
+defp parse_lines([line | rest], acc) do
+  case parse(line) do
+    {:ok, v} -> parse_lines(rest, [v | acc])
+    :error -> parse_lines(rest, acc)
+  end
+end
+
+# GOOD — for-comprehension with pattern in generator
+def parse_lines(lines), do: for {:ok, v} <- Enum.map(lines, &parse/1), do: v
+```
+
+Manual recursion is right when:
+- Multiple accumulators with complex state-machine logic — but consider `for ... reduce: tuple` first.
+- Mutual recursion across two functions (rare).
+- Tree / graph traversal where the structure isn't a list.
+- Long-running process loops (`def loop(state), do: receive do ... end`).
+
+For other cases, reach for the reduce family before writing recursion.
+
+#### 5.10.13 Threading-builder pattern — when the subject accumulates state
+
+Some Elixir APIs don't fit the pipeline shape (where each step *transforms* the subject's type). They follow the *threading-builder* shape: the subject keeps the same type, and each step ENRICHES it with more state. The canonical examples are `Ecto.Multi`, `Ecto.Query`, `Plug.Conn`, and Phoenix LiveView's `Socket`. This is the 6th composition mechanism in `elixir-planning/SKILL.md` §4.7.1.
+
+**Recognition pattern — the API gives it away:**
+- Constructor function (`Multi.new/0`, `Conn` from a plug, `socket` from `mount/3`).
+- Many "builder" functions all returning the same type (`Multi.insert/3 :: Multi.t()`, `assign/3 :: Socket.t()`, `put_resp_header/3 :: Conn.t()`).
+- One "terminal" function that consumes the built-up subject (`Repo.transaction/1`, `send_resp/3`, `render/2`).
+
+**Canonical templates:**
+
+```elixir
+# Ecto.Multi — atomic multi-step transaction
+Multi.new()
+|> Multi.insert(:order, Order.changeset(%Order{}, attrs))
+|> Multi.update(:user, User.changeset(user, %{order_count: user.order_count + 1}))
+|> Multi.run(:notify, fn _, %{order: order} ->
+  Notifications.send_order_confirmation(order)
+end)
+|> Repo.transaction()
+
+# Plug.Conn — building up a response
+conn
+|> put_resp_header("x-request-id", request_id)
+|> put_resp_cookie("session", session_id, http_only: true)
+|> put_resp_content_type("application/json")
+|> send_resp(200, body)
+
+# LiveView Socket — building up assigns + commands
+socket
+|> assign(:user, user)
+|> stream(:posts, posts)
+|> push_event("scroll-to-bottom", %{})
+```
+
+**The anti-pattern is re-binding instead of piping:**
+
+```elixir
+# BAD — each `=` breaks the threading; reads imperatively
+multi = Multi.new()
+multi = Multi.insert(multi, :order, order_changeset)
+multi = Multi.update(multi, :user, user_changeset)
+multi = Multi.run(multi, :notify, fn _, %{order: o} -> notify(o) end)
+Repo.transaction(multi)
+
+# GOOD — threading-builder pipeline
+Multi.new()
+|> Multi.insert(:order, order_changeset)
+|> Multi.update(:user, user_changeset)
+|> Multi.run(:notify, fn _, %{order: o} -> notify(o) end)
+|> Repo.transaction()
+```
+
+**Why threading-builder is distinct from a regular pipeline:**
+
+| Aspect | Pipeline | Threading-builder |
+|---|---|---|
+| Subject type at each step | CHANGES (`String` → `[String]` → `Map`) | FIXED (`Multi.t()` everywhere) |
+| Step semantics | TRANSFORMS the value | ENRICHES the value with more state |
+| Terminal step | Yields the final value | Consumes the built-up subject (`Repo.transaction`, `send_resp`) |
+| Failure handling | None inherent | Often via the consumer (`{:error, name, value, _}` from `Multi`) |
+
+**Subject-type fixedness is the discriminator.** If you can re-arrange the steps without changing the type signature at each position, it's a threading-builder. If reordering breaks the type chain, it's a regular pipeline.
+
+### 5.11 Bounded command/plugin registry — the safe replacement for runtime eval and dispatch
 
 When external input picks the operation to run, the registry IS the security boundary. Unknown names return `{:error, :unknown_command}` instead of executing arbitrary code. This pattern replaces every `Code.eval_*` and every `apply` with a tainted module/function name (rule §1 #25/#26).
 
@@ -1518,7 +2110,7 @@ end
 
 **Reference**: this is the shape Phoenix routers compile to (the `match` macros build a compile-time dispatch table) and how Oban resolves a `worker` argument to a module (workers are configured at compile time per queue, never named by the job payload).
 
-### 5.11 Safe ETF deserialization — when ETF is unavoidable
+### 5.12 Safe ETF deserialization — when ETF is unavoidable
 
 **For external payloads, prefer JSON.** ETF should appear only on intra-cluster channels (signed cookies, `:gen_tcp` between known nodes, etc.) — and even there, route through `Plug.Crypto.non_executable_binary_to_term/2`, which forbids funs / pids / refs at decode time:
 
@@ -1559,7 +2151,7 @@ end
 
 The `Plug.Session.Cookie` store and `Phoenix.Token` are the production references for the ETF path; `Plug.Parsers.JSON` is the reference for the JSON-DTO path.
 
-### 5.12 Logger.metadata propagation across async boundaries
+### 5.13 Logger.metadata propagation across async boundaries
 
 `Logger.metadata` is per-process. A task spawned from a request handler does **NOT** inherit the request's `trace_id` / `request_id` / `tenant_id`. Any log line or telemetry event the task emits will be orphan — invisible when an operator searches by correlation ID.
 
@@ -1616,7 +2208,7 @@ When the metadata you want to propagate is more than a couple of keys, use an ex
 
 **Verification grep:** `grep -rn "Logger.metadata\|Task\." lib/` should show that every `Task.async` / `Task.Supervisor.start_child` call is preceded (in the same function or an enclosing wrapper) by a `Logger.metadata()` capture, OR receives a context struct as an argument.
 
-### 5.13 Secret-bearing struct — opaque inspect by default
+### 5.14 Secret-bearing struct — opaque inspect by default
 
 Every struct that carries a secret-bearing field declares a safe `Inspect` rendering at definition time. **No struct ships without it.** Crash dumps include process state in SASL reports, observer, and remote shells; without an Inspect override every field is printed verbatim, including secrets that may end up in monitoring systems and incident channels.
 
@@ -1655,7 +2247,7 @@ end
 
 `:token`, `:auth_token`, `:access_token`, `:refresh_token`, `:session_token`, `:reset_token`, `:bearer_token`, `:csrf_token`, `:id_token`, `:secret`, `:client_secret`, `:secret_key`, `:secret_key_base`, `:api_key`, `:api_secret`, `:private_key`, `:signing_key`, `:encryption_key`, `:password`, `:password_hash`, `:password_digest`, `:hashed_password`, `:encrypted_password`, `:otp_secret`, `:totp_secret`.
 
-### 5.14 Sanitized errors at the response boundary
+### 5.15 Sanitized errors at the response boundary
 
 Drain stacktraces into `Logger` / `:telemetry.execute`; return a bounded error code; never put `__STACKTRACE__` in a response body.
 
@@ -1709,7 +2301,7 @@ end
 
 The boundary calls only `MyApp.Errors.to_response/1`, never reaches for `__STACKTRACE__` directly.
 
-### 5.15 Versioned event/command struct
+### 5.16 Versioned event/command struct
 
 Two conventions for evolving persisted/exchanged event payloads. Pick ONE per project and document it in the planning gate (§0.1).
 
@@ -1765,6 +2357,8 @@ end
 | `defimpl Commanded.Event.Upcaster` (Convention B) | Project uses Commanded / EventStore; one event module per type; upcaster handles back-compat |
 
 Mixing the two is acceptable but the project must declare which is the default for new events.
+
+---
 
 ---
 
@@ -2559,6 +3153,8 @@ end
 
 ---
 
+---
+
 ## 8. Daily Operations
 
 > **Depth:** For `@spec`/`@type`/`@doc`/`@moduledoc`/doctests/Dialyzer, load [type-and-docs.md](type-and-docs.md). For Ecto schemas/changesets/queries/migrations/Multi, load [ecto-patterns.md](ecto-patterns.md). For TCP/UDP/protocol-framing code, load [networking-patterns.md](networking-patterns.md).
@@ -3242,6 +3838,88 @@ Supervisor.init(children, strategy: :one_for_one)  # WRONG
 Supervisor.init(children, strategy: :rest_for_one)
 ```
 
+### 9.13 Memoization templates — caching pure-fn results
+
+A pure deterministic building-block function (axes 1 + 2 of `elixir-planning/building-blocks.md` §3.1) can be memoized safely — same input always produces same output, so the cache is correct. **An impure or non-deterministic function CANNOT be memoized without lying.** Memoization is therefore a payoff that *only* building-blocks unlock.
+
+The cache lives in the orchestrator layer, NOT in the building-block. The building-block stays pure and property-testable; the orchestrator wraps it with a cache lookup.
+
+**ETS-backed memoize — the default shape:**
+
+```elixir
+# 1. Owner module creates the table at app start (in the supervision tree)
+defmodule MyApp.TokenCache do
+  use GenServer
+
+  def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  @impl true
+  def init(:ok) do
+    :ets.new(:token_cache, [:named_table, :public, read_concurrency: true])
+    {:ok, %{}}
+  end
+end
+
+# 2. Public API — orchestrator wraps the building-block with cache lookup
+defmodule MyApp.Tokens.Cached do
+  alias MyApp.Tokens
+
+  @spec sign(map(), String.t()) :: String.t()
+  def sign(payload, secret) do
+    key = {payload, secret}
+
+    case :ets.lookup(:token_cache, key) do
+      [{^key, signed}] ->
+        signed
+
+      [] ->
+        signed = Tokens.sign(payload, secret)   # building-block, pure
+        :ets.insert(:token_cache, {key, signed})
+        signed
+    end
+  end
+end
+```
+
+**`:persistent_term` for read-mostly lookup tables:**
+
+```elixir
+# Boot-time write — typically in Application.start/2 or a one-shot GenServer
+defmodule MyApp.RegexCache do
+  @patterns [
+    email: ~r/^[\w.+-]+@[a-z0-9-]+\.[a-z0-9.-]+$/i,
+    slug: ~r/^[a-z0-9-]+$/,
+    iso8601: ~r/^\d{4}-\d{2}-\d{2}/
+  ]
+
+  def install do
+    :persistent_term.put({__MODULE__, :patterns}, Map.new(@patterns))
+  end
+
+  def get(name) do
+    :persistent_term.get({__MODULE__, :patterns})
+    |> Map.fetch!(name)
+  end
+end
+```
+
+**Critical warning: `:persistent_term` writes are O(N) where N = process count.** Every `:persistent_term.put/2` triggers a global GC scan across all processes; on a node with 100K processes this stalls the entire VM for measurable time. Use `:persistent_term` ONLY for boot-time writes (config, compiled regex, lookup tables). For runtime-changing values, use ETS.
+
+**When to memoize:**
+- Function is on a hot path (called every request, every event, every iteration).
+- Function is deterministic AND pure (axes 1 + 2 hold strict).
+- Inputs have low cardinality OR high reuse — same arguments repeat enough that the cache pays off.
+- Computation is expensive: regex compile, hash, parse, large-data serialization.
+
+**When NOT to memoize:**
+- Function is impure (reads from DB, network, clock, random) — caching returns stale values.
+- Function is cheap enough that lookup overhead beats recompute.
+- Memory budget is tight — cached entries don't expire automatically; bound the cache size or use Cachex / Nebulex with TTL.
+
+**Cache invalidation strategy** belongs in the orchestrator. ETS-backed memoize for a pure fn doesn't need invalidation if inputs are content-addressed (the key IS the input — different inputs naturally land on different cache lines). For caches keyed by external identifiers (user_id), invalidate on the write path: `Repo.update(user); :ets.delete(:cache, user_id)`.
+
+Cross-reference: `elixir-planning/SKILL.md` §4.7.8 (memoization is a building-block payoff, design-stage decision); §9.2 above for ETS table options. The Archdo rule `5.75 MemoizeOpportunity` (planned) flags building-block functions with expensive calls but no cache.
+
 ---
 
 ## 10. Architecture — Key Decisions While Implementing
@@ -3323,6 +4001,7 @@ defmodule Archdo.Diagnostic do
   # ... defstruct, builders ...
 end
 ```
+
 
 ### 10.2 Behaviour vs protocol — the polymorphism decision
 

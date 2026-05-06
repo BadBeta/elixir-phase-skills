@@ -32,6 +32,7 @@ This SKILL.md covers the decision tables and quick-reference material. For depth
 
 | Subskill | Scope | Load when |
 |---|---|---|
+| [building-blocks.md](building-blocks.md) | Building-block as a planning lens — the six-axis checklist (input closure, determinism, spec, totality, side-effect freedom, errors-as-values) plus input-guard axis, module / context classification (`building_block` / `orchestrator` / `interface`), refactor decision tree, context-as-building-block, cross-link to Archdo Blackbox enforcement (CE-54/55/56/57) | Designing a new module / context; deciding what's pure vs orchestrator; making more code property-test-friendly |
 | [architecture-patterns.md](architecture-patterns.md) | Hexagonal, layered, modular monolith, event-driven, CQRS, microservices — deep walkthroughs | Deciding architectural style for a project or context |
 | [process-topology.md](process-topology.md) | Supervision tree design, error kernel, process-per-service vs per-entity, instructions pattern, callback module pattern | Designing the supervision tree; placing processes |
 | [otp-design.md](otp-design.md) | OTP construct choice — GenServer vs Task vs Agent vs `:gen_statem` vs ETS vs `:persistent_term` vs GenStage/Broadway vs Oban | Picking the OTP primitive for a use case |
@@ -48,9 +49,9 @@ This SKILL.md covers the decision tables and quick-reference material. For depth
 ## How to use this skill
 
 0. **Resuming a long-running project (M-prefix commits, `continue.md`, multi-session work)?** — **Load `long-running-projects.md` first.** It's the meta-workflow for everything below: which document records what (PLAN.md vs continue.md vs commit messages), milestone-boundary checklist (incl. Ecto-specific invariants), SSOT invariant verification, cross-session handoff quality. If the project has 5+ commits with `M\d+:` prefixes, this subskill is the primary reference; the rest of this SKILL.md becomes lookup material for specific design questions within a milestone.
-1. **Starting a new project?** — Read §0 (Plan-Completeness Gate) first, then §1 (Rules), §2 (Planning Workflow), §5 (Project Layout). Walk through the decisions in sequence.
-2. **Adding a new feature to an existing project?** — §0 (Plan-Completeness Gate), §2 (Planning Workflow), §3 (Master Decision Table). Check §6 (do I need a new context?) and §8 (do I need a new process?).
-3. **Refactoring?** — §13 (Growing Architecture) to identify where you are, §14 (Anti-patterns) to find what to fix, §6 and §9 for context/integration rework.
+1. **Starting a new project?** — Read §0 (Plan-Completeness Gate) first, then §1 (Rules), §2 (Planning Workflow), §5 (Project Layout). Walk through the decisions in sequence. Before each module, run the building-block classification (§1 rule 11b; depth in `building-blocks.md`).
+2. **Adding a new feature to an existing project?** — §0 (Plan-Completeness Gate), §2 (Planning Workflow), §3 (Master Decision Table). Check §6 (do I need a new context?) and §8 (do I need a new process?). For each new module: classify as building-block / orchestrator / interface (`building-blocks.md` §3 checklist).
+3. **Refactoring?** — §13 (Growing Architecture) to identify where you are, §14 (Anti-patterns) to find what to fix, §6 and §9 for context/integration rework. **For making more code property-test-friendly: load `building-blocks.md` §5 (extract vs refactor-in-place) and run Archdo `Blackbox.refactor_distance/1` to rank candidates.**
 4. **Choosing how two parts of the system should talk?** — §9 (Inter-Context Communication) — the 6 mechanisms and the decision guide.
 5. **Designing for failure?** — §11 (Resilience) — where circuit breakers, retries, and degradation live.
 6. **About to write code?** — Verify the plan passes §0 before handing off. Load `elixir-implementing` alongside this skill.
@@ -179,6 +180,7 @@ Before declaring planning done and loading `elixir-implementing`:
 9. **NEVER call `Repo` across context boundaries.** Each table is owned by exactly one context. Other contexts read through the owning context's public API.
 10. **NEVER put business logic in interface modules** (controllers, LiveViews, CLI handlers, GenServer callbacks). Interfaces translate input, delegate to a context, format output. Business logic lives in pure functions inside contexts.
 11. **PREFER pure functions over processes.** Use a GenServer only when you need shared mutable state, serialized access to a resource, or scheduled work. If two concepts always change together in the same flow, they belong in the same process (or no process at all).
+11b. **ALWAYS classify every new module as `building_block` / `orchestrator` / `interface` BEFORE typing the moduledoc.** A building-block is a module whose every public function passes the seven-axis checklist (input closure, determinism, `@spec`, totality, side-effect freedom, errors-as-values, constrained input domain). An orchestrator is a module that connects building-blocks to side effects (DB, clock, telemetry, PubSub, external services). An interface translates IO (controller, LiveView, worker, CLI). Mixing the three in one module produces hard-to-test code and fails Archdo's `Blackbox` analyzer. **Maximize building-block coverage**: extract a building-block out of every module that mixes pure logic with side effects (see `building-blocks.md` §5 for the extract-vs-refactor-in-place decision tree). Aim for ≥ 60% of `lib/my_app/` modules to be building-blocks; ≥ 80% of pure-domain modules. **Context-level**: a context IS a building-block when every module under its namespace is a building-block; the orchestrator lives outside (typically `MyApp.Catalog.Workflow`). Cross-link: this rule is enforced by Archdo CE-54/55/56/57 (`BlackboxQuadrant`, `UntestedBuildingBlock`, `EffectLeak`, `UnguardedBuildingBlock`); the design-time discipline that makes those rules silent is in `building-blocks.md`.
 12. **ALWAYS design for replaceability.** Can you swap this component's implementation without changing business logic? If not, introduce a behaviour at the boundary.
 13. **ALWAYS define the aggregate consistency boundary** for domain operations. One aggregate per transaction. Cross-aggregate operations are sagas or eventual consistency, never multi-aggregate `Repo.transaction`.
 14. **ALWAYS identify which operations can be retried** (Oban workers, webhook handlers, event handlers, distributed calls) and design them to be idempotent from the start.
@@ -189,9 +191,12 @@ Before declaring planning done and loading `elixir-implementing`:
 19. **NEVER introduce distribution (multi-node clustering) until single-node is maxed out.** `Task.async_stream`, process pools, Broadway, read replicas — exhaust these first. Distribution brings network partitions, split-brain, and eventual consistency.
 20. **ALWAYS hand off to `elixir-implementing` for the actual code.** This skill decides *what to build*; the implementing skill covers *how to type it idiomatically*.
 21. **ALWAYS pass the plan-completeness gate (§0) before handing off.** A plan with TODOs, "TBD", "we'll pick later", or unresolved decisions is not a plan — it's a partial plan that will force decisions under pressure mid-implementation. Every checklist item in §0.1 must have a concrete noun answer (a name, a type, a signature, a number) before implementation begins. This rule has priority over all others: an incomplete plan poisons every downstream decision.
-22. **ALWAYS use battle-tested libraries for authentication, password hashing, session management, cryptography, JWTs, OAuth, secret comparison, and access tokens — NEVER hand-roll these.** Hand-rolling a security-critical primitive is an exception that requires explicit justification AND a security review; the default answer is "no." A "custom requirement" (non-standard `Authorization` scheme, custom claims shape, unusual session storage, exotic token format) is almost always a configuration parameter on a real library, NOT a reason to write your own. If you find yourself reaching for raw primitives (`Joken`, `:crypto`, hand-written plug pipelines, hand-rolled token format) ask: which library wraps these and exposes the customization I need? Almost always the answer exists. Canonical Elixir picks: `phx.gen.auth` (sessions+cookies for browser apps), Guardian (JWT for JSON APIs — `VerifyHeader`'s `scheme:` option handles non-standard headers), Ueberauth (OAuth), `bcrypt_elixir` / `argon2_elixir` (password hashing — lower rounds in `config/test.exs`, never via a behaviour-and-mock), `Plug.Crypto.secure_compare/2` (constant-time secret compare). The cost of using a library is one dep + one config block; the cost of hand-rolling is the bug you ship and don't notice.
-23. **ALWAYS design observability in from the start, with explicit Logger.metadata propagation across every async boundary.** `Logger.metadata` is per-process (documented Logger behaviour). A request's `request_id` / `trace_id` / `tenant_id` does NOT travel with `Task.async`, `Task.Supervisor.start_child`, `Oban.Job`, or `:erpc` calls. Pick the propagation strategy at planning time: capture-and-restore for single-hop async, an explicit `TraceContext` struct for multi-hop / cross-node. See §11.7 for the design table; every boundary in §0.1 implicitly requires its metadata-setter and metadata-propagation strategy named.
-24. **NEVER plan a system that converts external string identifiers to atoms.** Atoms are not garbage-collected; the BEAM atom table cap is ~1M. A request → atom path is a remote DoS primitive — an attacker sending a stream of unique strings permanently consumes table space, after which the node crashes and cannot recover until restart. Strings work as map keys, tuple tags, and HTTP/JSON identifiers; the only safe path from external string to atom is `String.to_existing_atom/1` against a closed compile-time allowlist. **`Ecto.Enum` is the canonical bounded-vocabulary pattern** — `field :status, Ecto.Enum, values: [:foo, :bar, :baz]` casts to atoms safely, raising on unknown values. Production libs (Phoenix, Plug, Guardian) DO use `String.to_atom` extensively — but every call site is on developer/config-time data (compiled module names, `.beam` filenames, route definitions, app-config permission keys), never on request data. The discipline is: trace the source of every string-that-becomes-atom; if it can be reached by an external request, it must go through an allowlist instead.
+22b. **ALWAYS pick a composition primitive at the design stage** for every multi-step operation. The four mechanisms — pipeline, railway (`with`-chain), protocol/behaviour, process — compose different kinds of things and must NOT be mixed in one operation. A "service" that's both a pipeline AND a process AND a behaviour-dispatch in the same function is undisciplined; pick one at planning time, layer the others around it (§4.7). For ok/error chains specifically: railway (`with`) is the dominant pattern — Elixir's bare `with` IS railway-oriented programming, with each `<-` as a track-switch. Plan the chain length (2–4 steps healthy, 7+ split into orchestrated phases). Split the *monadic* (`with`) and *applicative* (accumulating reduce) cases at planning time, not in implementation: monadic for sequential dependencies, applicative for independent validations whose errors should all surface. Cross-link: design-time vocabulary in §4.7; at-keyboard templates in `elixir-implementing/SKILL.md` §5.10.
+22c. **ALWAYS pass capabilities (clock, random, config, secrets) as arguments** in modules destined to be building-blocks. Hidden reads (`Application.get_env`, `:rand.uniform`, `DateTime.utc_now`, `:persistent_term.get`, `:ets.lookup`) fail axis 1 of the building-block checklist (`building-blocks.md` §3.1). The Elixir form of the Reader-monad pattern is a `ctx` struct (or a few explicit args) threaded through the call chain. Behaviour-based DI is the right shape when there are 2–3 implementations chosen per environment (mailer, HTTP client); plain capability-arguments for everything else. Decide which axis-7 strategy you'll use BEFORE writing the building-block — retrofitting capability arguments to deeply-nested helpers is the painful refactor that drives "this code is hard to test" complaints (§4.7.4).
+22d. **ALWAYS plan effects-as-data when a building-block must signal "this should happen"** but isn't allowed to do it. Return events as a list (`{:ok, value, [{:emit, :user_registered, %{}}]}`); the orchestrator interprets and dispatches. This is the writer-monad shape adapted to Elixir's tagged-tuple convention. Use it whenever the decision and the execution live in different layers OR when multiple potential effects need a single source of truth. Skip it for trivial single-effect cases (§4.7.3, `elixir-implementing/SKILL.md` §5.10.7).
+23. **ALWAYS use battle-tested libraries for authentication, password hashing, session management, cryptography, JWTs, OAuth, secret comparison, and access tokens — NEVER hand-roll these.** Hand-rolling a security-critical primitive is an exception that requires explicit justification AND a security review; the default answer is "no." A "custom requirement" (non-standard `Authorization` scheme, custom claims shape, unusual session storage, exotic token format) is almost always a configuration parameter on a real library, NOT a reason to write your own. If you find yourself reaching for raw primitives (`Joken`, `:crypto`, hand-written plug pipelines, hand-rolled token format) ask: which library wraps these and exposes the customization I need? Almost always the answer exists. Canonical Elixir picks: `phx.gen.auth` (sessions+cookies for browser apps), Guardian (JWT for JSON APIs — `VerifyHeader`'s `scheme:` option handles non-standard headers), Ueberauth (OAuth), `bcrypt_elixir` / `argon2_elixir` (password hashing — lower rounds in `config/test.exs`, never via a behaviour-and-mock), `Plug.Crypto.secure_compare/2` (constant-time secret compare). The cost of using a library is one dep + one config block; the cost of hand-rolling is the bug you ship and don't notice.
+24. **ALWAYS design observability in from the start, with explicit Logger.metadata propagation across every async boundary.** `Logger.metadata` is per-process (documented Logger behaviour). A request's `request_id` / `trace_id` / `tenant_id` does NOT travel with `Task.async`, `Task.Supervisor.start_child`, `Oban.Job`, or `:erpc` calls. Pick the propagation strategy at planning time: capture-and-restore for single-hop async, an explicit `TraceContext` struct for multi-hop / cross-node. See §11.7 for the design table; every boundary in §0.1 implicitly requires its metadata-setter and metadata-propagation strategy named.
+25. **NEVER plan a system that converts external string identifiers to atoms.** Atoms are not garbage-collected; the BEAM atom table cap is ~1M. A request → atom path is a remote DoS primitive — an attacker sending a stream of unique strings permanently consumes table space, after which the node crashes and cannot recover until restart. Strings work as map keys, tuple tags, and HTTP/JSON identifiers; the only safe path from external string to atom is `String.to_existing_atom/1` against a closed compile-time allowlist. **`Ecto.Enum` is the canonical bounded-vocabulary pattern** — `field :status, Ecto.Enum, values: [:foo, :bar, :baz]` casts to atoms safely, raising on unknown values. Production libs (Phoenix, Plug, Guardian) DO use `String.to_atom` extensively — but every call site is on developer/config-time data (compiled module names, `.beam` filenames, route definitions, app-config permission keys), never on request data. The discipline is: trace the source of every string-that-becomes-atom; if it can be reached by an external request, it must go through an allowlist instead.
 
 ---
 
@@ -529,6 +534,173 @@ end
 - **Version via new modules**, not by adding required callbacks to existing behaviours (breaking change).
 
 See `architecture-patterns.md` §4.7–4.11 for the full treatment.
+
+### 4.7 Composition — the design vocabulary
+
+Composition is *the* central concern of functional design: small pieces snap together because their inputs and outputs match. Elixir gives you four composition mechanisms, each with a distinct shape — and the choice of which to use is a *design-time* decision, not a "we'll see what fits" decision. Pick at planning time; commit at module-creation time.
+
+**Building-blocks are the foundation; composition is the payoff.** Every composition primitive in this section delivers its full value ONLY when applied to building-blocks (`building-blocks.md`):
+
+- **Railway / `with`-chain** composes functions that return `{:ok, _}` / `{:error, _}` — that's axis 6 (errors-as-values) of the building-block checklist.
+- **`Result.map` / functor** composes pure transforms over success values — axes 1–6 (purity, determinism, no side effects).
+- **Applicative validation** accumulates errors from independent pure validators — axes 1, 5, 6.
+- **Effects-as-data** is the *only* honest way for a building-block to communicate "this should happen" without doing it (axis 5).
+- **Capability passing** IS axis 1 (input closure) restated as a composition pattern — the values needed from outside flow in as arguments.
+- **Smart constructors** push validation to one place and grant axis 7 (input guard) automatically to every downstream consumer.
+- **Subject-position discipline** is what makes building-block functions snap into pipelines without contortion.
+
+Composition built on top of impure code is a half-payoff: you can wire functions together, but you can't property-test the chain, you can't memoize, and you can't reason locally. Composition built on top of building-blocks gives you all three. **The slogan: build building-blocks, then COMPOSE them.**
+
+The composition × building-block axes matrix:
+
+| Composition primitive | Depends on building-block axes | Why |
+|---|---|---|
+| Railway / `with`-chain | 6 (errors-as-values) | Steps must return tuples, never raise |
+| `Result.map` / functor | 1, 5, 6 | The mapped function must be pure and total |
+| Applicative validation | 1, 5, 6 | Validators must be pure to combine cleanly |
+| Effects-as-data | 5 (no side effects in the producer) | The whole pattern exists to keep the producer pure |
+| Capability passing | 1 (input closure) | This IS the technique that satisfies axis 1 |
+| Smart constructors | 7 (input guard, downstream) | Push axis-7 from N consumers to 1 constructor |
+| Pipeline (`\|>`) | (subject-first discipline) | Every step's first arg = data; orthogonal to purity but required for chaining |
+| Stream (lazy pipeline) | 1, 5 | Laziness preserves purity ONLY if the elements + transforms are pure; an impure step inside a Stream chain runs at materialization time, not at chain-construction time — the bug is harder to trace |
+| Threading-builder | (subject-first discipline; axis-orthogonal otherwise) | `Multi`/`Conn`/`Socket` subjects are intrinsically effectful but the SHAPE is composable; re-binding instead of piping breaks the shape |
+| Lens / `update_in` | 5 (the update must be pure) | Side-effect mid-update breaks the lens algebra |
+| Reduce-as-fold | 1, 5, 6 | The reducer fn must be pure; its accumulator is the fold's state |
+| Memoization | 1, 2 (input closure + determinism) | Caching impure or non-deterministic functions LIES — the cache returns a stale or wrong value |
+| Encoder/decoder pair | 1, 2, 5, 6 | Round-trip property `decode(encode(x)) == x` requires deterministic, pure pair |
+| Phantom / branded types | 7 (input guard at construction) | The validated state is encoded in the type — downstream consumers inherit axis-7 for free |
+
+#### 4.7.1 The six composition mechanisms
+
+| Mechanism | Composes... | Mechanism in Elixir |
+|---|---|---|
+| **Pipeline** (`\|>`) | Eager data transformations | Subject-first functions threaded through `\|>` (subject TYPE may change at each step) |
+| **Stream** | Lazy / I/O-sourced / unbounded data transformations | `Stream.*` chain ending in one terminal `Enum.*` — same shape as a pipeline but lazy |
+| **Threading-builder** | A subject that ACCUMULATES state across steps (subject type doesn't change) | `Multi.new() \|> Multi.insert() \|> Multi.update() \|> Repo.transaction()`; `socket \|> assign() \|> stream() \|> push_event()`; `Plug.Conn` chains |
+| **Railway / `with`-chain** | Sequential ok/error operations | `with {:ok, _} <- f(), {:ok, _} <- g(_)` — Elixir's adaptation of railway-oriented programming |
+| **Protocol / Behaviour** | Type or module dispatch | `defprotocol` (data-type dispatch), `@callback` (module-identity dispatch) |
+| **Process / GenServer** | Stateful or concurrent collaborators | Supervised processes; messages are the protocol |
+
+The first four compose **pure values**; the last two compose **modules / processes**. Building-blocks (see `building-blocks.md`) max-out the value-composition layer; orchestrators connect that layer to the module/process layer.
+
+**Distinguishing the four value-composition shapes:**
+
+- **Pipeline** — subject type CHANGES at each step (`String.t()` → `[String.t()]` → `Map.t()`). Each step is a transformation.
+- **Stream** — same shape as pipeline but every intermediate is lazy. Use when source is `File.stream!`, `Repo.stream`, `IO.stream`, `Stream.resource/3`, or when collection size is unknown / unbounded. Materialize with one terminal `Enum.*` at the end.
+- **Threading-builder** — subject type is FIXED (always `Multi.t()`, always `Plug.Conn.t()`, always `Phoenix.LiveView.Socket.t()`); each step ENRICHES the subject with more state. Failure mode is re-binding (`x = step1(); x = step2(x)`) instead of piping.
+- **Railway** — subject is wrapped in `{:ok, _}`/`{:error, _}`; failure short-circuits. Each step is a sequential dependency.
+
+#### 4.7.2 Railway-Oriented Programming, adapted to Elixir's `with`
+
+Wlaschin's railway model: every step is a switch in a two-track railway — success-track on top, failure-track on bottom. A function on the success-track returns either a success value (continue on top) or an error (drop to bottom, skip the rest). **Elixir's `with` IS the railway** — bare `with` (no `else`) propagates errors exactly as the railway predicts: a non-matching `<-` step's value becomes the whole expression's value.
+
+**Connection to building-blocks:** the railway only works because each step returns ok/error tuples and never raises — that's axis 6 of the building-block checklist. Plan the railway in the building-block layer (typically `MyApp.Catalog`); plan the orchestrator that drives it in `MyApp.Catalog.Workflow`. The orchestrator is allowed to wrap impure steps (Repo, HTTP, mailer) in the same `with` chain, but the impure steps must themselves return ok/error — the orchestrator's job is to keep the railway shape consistent across pure and impure stops.
+
+**Plan a railway when:** you have 2+ ok/error steps where each step depends on the previous step's value (extract from a request, validate, transform, persist). Each `<-` is one step on the railway.
+
+**Plan an accumulating reduce instead when:** the steps are *independent* and the user wants to see ALL errors (form validation across fields, batch import, parallel HTTP fetches). `with` short-circuits on first error — wrong UX for these.
+
+The split is between **monadic** (sequential, short-circuit) and **applicative** (independent, accumulate) — the same FP distinction, mapped to Elixir's two natural shapes (`with` vs `Enum.reduce`). See `elixir-implementing/SKILL.md` §5.10.1–§5.10.6 for the templates.
+
+#### 4.7.3 Effects-as-data — the writer pattern, adapted to Elixir
+
+A building-block can't emit `Logger`, `Repo`, `PubSub`, or `:telemetry` calls (axis 5 of the building-block checklist). But the building-block KNOWS what should happen. Plan the return shape to carry the effects as data — `{:ok, value, [events]}` — and let the orchestrator interpret. This is the writer-monad pattern, naturally expressed in Elixir's tagged-tuple convention without any library.
+
+When to plan for effects-as-data:
+- The decision (what should happen) and the execution (do it) live in different layers — typical for any building-block + orchestrator split
+- Multiple potential effects (telemetry + email + audit-log entry) need a single source of truth on which fired
+- You want the building-block property-tested without effect mocks
+
+When NOT to:
+- Exactly one effect, transactional — the orchestrator's `with` chain handles it inline
+- Effects vary so wildly per call that the events-list shape is harder to reason about than direct calls
+
+#### 4.7.4 Capability passing — Reader-monad shape, adapted to Elixir
+
+Anything a building-block needs from the environment — `now()`, random, configuration, secrets — comes in as an *argument*. The orchestrator resolves the capability at call time. For multiple capabilities, bundle them in a `ctx` struct (`%MyApp.Clock.Ctx{}`) — that struct IS a Reader-monad value being threaded through the call chain.
+
+**Capability passing is non-negotiable for axis 1 (input closure)** of the building-block checklist. A building-block that calls `DateTime.utc_now/0` directly fails the checklist; one that takes `now :: DateTime.t()` as an argument and uses it passes.
+
+Behaviour-based DI (config-pick the impl per environment) is a degenerate form of capability passing: useful for 2–3 implementations chosen at boot (mailer, HTTP client), not for 5+ runtime-varying capabilities. Use it sparingly; prefer plain capability-arguments for runtime variation.
+
+#### 4.7.5 Smart constructors — opacity makes axis 7 free
+
+A struct with an `@opaque` type and a validating `new/1` constructor is the upstream trick that simplifies axis 7 (input guard) for every downstream function. Once a `%Email{}` exists, you know it's valid; downstream functions taking `%Email{}` don't need their own validation. The constructor is the *only* place that validation lives — every consumer is automatically input-guarded by the type.
+
+Plan opacity at the design stage (`architecture-patterns.md` §4.12) for any value that has invariants: `%Email{}`, `%Slug{}`, `%MonetaryAmount{}`, `%PhoneNumber{}`, `%TenantId{}`. The cost is one constructor + accessor function per struct; the payoff is propagated input-safety across every function that takes that type.
+
+**Bidirectional pairs — every encoder ships its decoder.** Smart constructors are one half of a bidirectional pair. The other half is the inverse: render the value to a serialized form, then parse it back. The round-trip property `parse(render(x)) == {:ok, x}` is property-test gold. Stdlib examples: `Date.to_iso8601/1` + `Date.from_iso8601/1`, `URI.to_string/1` + `URI.parse/1`, `Jason.encode/1` + `Jason.decode/1`. When you ship a value type with `new/1`, also ship `to_serialized/1` (and the reverse parser) — and add a property test that asserts the round-trip. See `architecture-patterns.md` §4.12.3 for the `Ecto.Type` `dump`/`load` mechanics that follow the same pattern.
+
+**When to plan a phantom/branded type instead** — if the value has multiple lifecycle states (verified vs. unverified email, sealed vs. open envelope, draft vs. published document) and downstream consumers should ONLY accept the validated state, plan two structs (`%UnverifiedEmail{}` returned from raw input, `%Email{}` returned from `verify/1`). Functions take the state-bearing type they require; callers can't accidentally feed an unverified value into a verified-only function. See `architecture-patterns.md` §4.12.8 for the pattern.
+
+#### 4.7.6 Decision summary — given a problem, which composition primitive
+
+| Situation | Mechanism |
+|---|---|
+| Sequential transformation of one value | Pipeline (`\|>`) |
+| Sequential ok/error operations, one fails → stop | Railway / `with`-chain (§5.10.1) |
+| Independent validations, accumulate failures | Accumulating reduce (§5.10.6) |
+| One-step transform on a Result | `with {:ok, v} <- f(), do: {:ok, fn.(v)}` (§5.10.5) |
+| Distinguish which step failed | Tagged-tuple `with` (§5.10.3) |
+| Build a value once, reuse across functions | Smart constructor (`@opaque` + `new/1`) (§4.12 in architecture-patterns) |
+| Communicate "this should happen" without doing it | Return events list `{:ok, value, [events]}` (§5.10.7) |
+| Read clock / random / config in pure code | Capability argument (§5.10.8) |
+| Update a deeply nested field | `update_in` / `put_in` with Access path (§5.10.9) |
+| Dispatch on data type | Protocol |
+| Dispatch on module identity, swap per env | Behaviour + Application config |
+| Coordinate stateful / concurrent collaborators | Supervised process (GenServer / `:gen_statem`) |
+
+Section references in this row are to `elixir-implementing/SKILL.md` §5.10 — that's where the at-keyboard templates live.
+
+#### 4.7.7 Composability density — a metric, not a rule
+
+For each building-block module, ask: *how many distinct callers compose with it through its first-arg position?* High density (≥ 3 callers using it via pipelines) means the module is delivering on the composition promise; low density means it's a building-block in shape but not in use. Use this metric to rank which building-blocks to property-test first — high-density blocks have the most leverage. This is one of Archdo's planned metrics (`Archdo.Blackbox.composability_density/2`).
+
+#### 4.7.8 Memoization is a building-block payoff
+
+A pure deterministic function (axes 1 + 2 of the building-block checklist) can be memoized safely: same input → same output → caching the output is correct. **An impure or non-deterministic function CANNOT be memoized without lying** — the cache returns a stale or wrong value. Memoization is therefore a payoff that *only* building-blocks unlock; any module that fails axis 1 or 2 is structurally ineligible.
+
+**Plan memoization at the design stage when:**
+- The building-block function is on a hot path (called every request, every event, every iteration of a loop).
+- The function is genuinely expensive: regex compilation, ISO 8601 parsing, hash computation, large-data serialization.
+- Inputs have low cardinality OR high reuse (the same arguments repeat often enough that caching pays off).
+
+**Two storage shapes to choose from:**
+
+| Storage | Use when | Read cost | Write cost |
+|---|---|---|---|
+| **ETS** (`:public, read_concurrency: true`) | Cache changes during runtime; concurrent readers and writers | O(1) | O(1) |
+| **`:persistent_term`** | Read-mostly lookup table; written ONCE at boot or rarely | O(1), faster than ETS | O(N) — copies across all processes |
+
+**`:persistent_term` is NEVER appropriate for hot-path writes** — every `put` triggers a global GC sweep proportional to the number of processes. Use it for boot-time tables (config, compiled regex, lookup maps); use ETS for everything else.
+
+**Architectural placement:** the cache lives in the orchestrator layer, not the building-block. The building-block stays pure; the orchestrator wraps it with a `cache_get` call:
+
+```elixir
+# Building-block (pure):
+defmodule MyApp.Tokens do
+  @spec sign(payload :: map(), secret :: String.t()) :: String.t()
+  def sign(payload, secret), do: # ... HMAC + Base64
+end
+
+# Orchestrator with ETS-backed cache:
+defmodule MyApp.Tokens.Cache do
+  def signed(payload, secret) do
+    key = {payload, secret}
+    case :ets.lookup(:token_cache, key) do
+      [{^key, signed}] -> signed
+      [] ->
+        signed = MyApp.Tokens.sign(payload, secret)
+        :ets.insert(:token_cache, {key, signed})
+        signed
+    end
+  end
+end
+```
+
+The building-block is property-testable without the cache; the cache is integration-testable with the building-block as a real dependency. Both layers are independently swappable.
+
+**See also:** `elixir-implementing/SKILL.md` §9.2 (ETS templates), §9.2.2 (`:persistent_term` hot-path config). The Archdo rule `5.75 MemoizeOpportunity` (planned in M-fp-C4) flags building-block functions with expensive calls but no cache in scope.
 
 ---
 
@@ -913,6 +1085,7 @@ Contexts don't exist in isolation — they relate to each other in specific ways
 | **Separate ways** | Contexts are independent | No direct communication, possibly PubSub |
 
 **Boundary atom-safety discipline:** every external string identifier crossing into a context — sort key from a query string, action name from a webhook, role name from a JWT claim, channel topic suffix — stays a string OR converts via `String.to_existing_atom/1` against a closed allowlist (`Ecto.Enum` is the canonical pattern). Never `String.to_atom/1` on request data. See §1 rule 24.
+
 
 ### 6.6 Anti-corruption layer (ACL)
 
