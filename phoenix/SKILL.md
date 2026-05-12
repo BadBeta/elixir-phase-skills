@@ -1693,6 +1693,71 @@ mix phx.gen.secret                # Generate secret key
 mix phx.digest                    # Static asset digest (prod)
 ```
 
+## Local Development Infrastructure
+
+### Postgres via Docker Compose
+
+Choose Docker over a system Postgres when: multiple Phoenix projects share the host, the project should run on a fresh machine without `apt install postgresql` ceremony, or CI uses the same image you do.
+
+```yaml
+# compose.yml
+services:
+  postgres:
+    image: postgres:17
+    container_name: my_app_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: my_app_dev
+    ports:
+      - "5435:5432"          # named port — avoid colliding with other projects
+    volumes:
+      - my_app_pg_data:/var/lib/postgresql/data
+volumes:
+  my_app_pg_data:
+```
+
+```elixir
+# config/dev.exs + config/test.exs
+config :my_app, MyApp.Repo,
+  username: "postgres",
+  password: "postgres",
+  hostname: "localhost",
+  port: 5435,                 # match the host-side port from compose.yml
+  database: "my_app_dev"
+```
+
+**Port discipline**: pick a non-default port per project (5435, 5436, …). The container-internal port stays 5432; only the host-side mapping is named. Multiple Phoenix projects can run their `compose up -d postgres` in parallel without collision.
+
+**Bring the DB up BEFORE `mix test`** on a fresh project. The default `test` alias is `["ecto.create --quiet", "ecto.migrate --quiet", "test"]` — without a reachable DB it fails before any test runs, with a confusing connection error.
+
+```bash
+docker compose up -d postgres
+mix test                          # alias runs ecto.create + ecto.migrate first
+```
+
+### `mix phx.gen.release --docker` partial-failure recovery
+
+The `--docker` generator fetches Erlang/Elixir image-tag metadata from Docker Hub at task time. When the upstream API 504s or rate-limits, the task aborts AFTER it has already created `rel/`, `lib/<app>/release.ex`, and the env wrappers — but BEFORE writing the `Dockerfile` and `.dockerignore`.
+
+Recovery: the `rel/` files don't need regeneration. Write the missing `Dockerfile` manually using a current `hexpm/elixir` base image:
+
+```dockerfile
+ARG ELIXIR_VERSION=1.18.4
+ARG OTP_VERSION=27.2
+ARG DEBIAN_VERSION=bookworm-20250113-slim
+
+ARG BUILDER_IMAGE="hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
+ARG RUNNER_IMAGE="debian:${DEBIAN_VERSION}"
+
+FROM ${BUILDER_IMAGE} AS builder
+# ... standard mix release builder stage
+FROM ${RUNNER_IMAGE}
+# ... standard runner stage with the release artifact
+```
+
+Cross-check against the latest Phoenix repo's `installer/templates/phx_release/Dockerfile.eex` for the exact shape.
+
 ## Anti-Patterns (BAD/GOOD)
 
 ### Context Bypass

@@ -245,6 +245,48 @@ Counter-measures:
   arc has multiple phases (initial scope, then discovered items),
   keep them in separate lists so the original intent is legible.
 
+## Plan-amendment hygiene — amend FIRST, implement SECOND
+
+When mid-milestone scope changes ("we should also support X"), the
+natural impulse is to extend the implementation and capture the new
+scope implicitly in commit messages. **Don't.** Amend `PLAN.md` first
+— add the new items to the relevant section (§4 out-of-scope policy,
+§1.4 decision tables, §12 pending list) — THEN write the
+implementation commits.
+
+Why this matters:
+
+- **The plan IS the audit surface.** Future readers (including
+  future-you) read `PLAN.md` to understand intent, not the git log.
+  An implementation that contradicts the plan looks like drift even
+  when it was deliberate.
+- **Commit messages are not a planning surface.** Their job is to
+  record *what changed and why*, not to redefine the project's
+  scope. A line in a commit message like "also added watermarking"
+  becomes invisible to anyone who doesn't grep the full log.
+- **Plan-vs-code drift compounds.** One implicit scope extension
+  isn't bad. Five accumulated over a long-running project means
+  the plan no longer matches the system.
+
+Failure mode to flag in self-review: a milestone diff that touches
+`lib/` but NOT `PLAN.md` (or any planning doc). Either the change
+is fully in-scope per the existing plan (the touched code was
+already specified) — verify by re-reading the relevant `PLAN.md`
+section — OR the plan needs amendment in the same commit (or an
+earlier commit on the same branch).
+
+Mechanical check before pushing a milestone:
+
+```bash
+git diff main..HEAD --name-only | grep -E "^lib/" && \
+  git diff main..HEAD --name-only | grep -q "PLAN.md" || \
+  echo "WARN: lib/ changes without PLAN.md touch — verify scope"
+```
+
+Not every milestone touches `PLAN.md` — bug fixes and refactors
+within already-planned scope don't need plan edits. The check is a
+prompt to think, not a hard rule.
+
 ## Commit-message style for long-running refactors
 
 A multi-commit refactor (e.g., "address code review findings M15")

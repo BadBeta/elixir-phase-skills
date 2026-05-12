@@ -150,6 +150,24 @@ git log --format="%H %s" --name-status -- path/to/module.ex path/to/module_test.
 
 Later test writing is a valuable defensive addition, but do NOT call it TDD and do NOT trust its coverage shape — tests-after tests tend to match the implementation rather than the intended behavior, so they pass even when the implementation is subtly wrong (see §3.8 BAD/GOOD).
 
+**Limitation of same-commit audits.** When test and impl files appear in the same commit, the git audit can't distinguish tests-first from tests-after — both produce identical `--name-status` output. The author's recollection isn't auditable.
+
+**For auditable TDD evidence**, commit the test file in a **separate commit** BEFORE the impl:
+
+```bash
+# Commit 1 — failing test only
+git add test/my_app/pricing_test.exs
+git commit -m "test: Pricing.discount/2 — RED"
+
+# Run mix test, confirm RED for the right reason, then implement.
+
+# Commit 2 — implementation
+git add lib/my_app/pricing.ex
+git commit -m "feat: Pricing.discount/2 — GREEN"
+```
+
+Git history then proves the ordering without relying on author claims. Use this discipline for high-stakes work (security-critical paths, payment flows, anything regulated). For ordinary feature work, in-commit TDD is fine — but in either case, the gate (§0.1) and milestone checklist (§0.3) apply.
+
 ### 0.7 When tests-after IS allowed
 
 Tests-after is correct for a **very narrow** set: HEEx/EEx templates, CSS/styling, and one-off scripts outside `lib/`/`src/`. That's it. A `def` in `lib/` is production code — "glue code", "thin wrapper", and "it's just forwarding" are NOT valid exemptions. The review that catches bugs in untested code costs 10x more than the test that prevents them. Performance optimizations are tested via benchmarks (Benchee), not ExUnit — but the benchmark must exist.
@@ -943,6 +961,40 @@ mix test --seed 123                   # Reproducible ordering (for debugging fla
 | DBConnection errors | Spawned process not allowed by sandbox | `Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), pid)` |
 | Time-dependent failure | Wall-clock assertion | Use `assert_in_delta` with tolerance, or inject a clock |
 | Factory uniqueness collisions | Hard-coded values, no `sequence/2` | Use `sequence(:email, &"user-#{&1}@example.com")` |
+| `mix test` fails on a fresh project with connection error | Default `test` alias runs `ecto.create --quiet`; no DB reachable | Bring the DB up before `mix test` (e.g. `docker compose up -d postgres`). The default alias is `["ecto.create --quiet", "ecto.migrate --quiet", "test"]` — the error is from the alias, not your tests |
+| `Registry` post-shutdown cleanup race | `Registry` handles registered-pid `:DOWN` asynchronously; `Registry.lookup/2` reads ETS directly so no `GenServer.call` can force a happens-before edge | Bounded poll — `assert_receive` cannot help here because Registry doesn't emit a completion message. See the template below. |
+
+### 4.10.1 Registry-cleanup test pattern
+
+`Registry` removes a registered pid's entries when it receives that pid's `:DOWN`. Both the `:DOWN` and the ETS cleanup are async with no signal exposed to test code. `Registry.lookup/2` bypasses Registry's `GenServer` queue and reads ETS directly, so calling another Registry function won't force ordering either.
+
+For a test that asserts "after the worker dies, Registry shows it gone", a bounded poll is the only correct shape:
+
+```elixir
+test "registry forgets the worker after it dies" do
+  {:ok, pid} = MyApp.WorkerRegistry.start_worker(:alice)
+  Process.exit(pid, :kill)
+  refute_eventually(fn -> match?([_ | _], Registry.lookup(MyApp.Registry, :alice)) end)
+end
+
+# Test helper — bounded poll, plus a clear comment for any reviewer who
+# reaches the Process.sleep and reaches for `assert_receive`.
+defp refute_eventually(check, timeout_ms \\ 200, step_ms \\ 10) do
+  deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+  poll = fn poll ->
+    cond do
+      not check.() -> :ok
+      System.monotonic_time(:millisecond) >= deadline -> flunk("condition never became false")
+      true -> Process.sleep(step_ms); poll.(poll)
+    end
+  end
+
+  poll.(poll)
+end
+```
+
+This is the one well-justified `Process.sleep` in test code: `Registry` provides no signal, so no `assert_receive` will work.
 
 ---
 

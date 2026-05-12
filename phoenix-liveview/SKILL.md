@@ -815,6 +815,15 @@ this.handleEvent("highlight", ({id}) => {
 })
 ```
 
+### Third-party widget recipes
+
+For full worked patterns for common third-party libraries (pdf.js,
+Chart.js, Monaco Editor, CodeMirror 6, Leaflet), see
+[js-recipes.md](js-recipes.md). Each recipe covers the install, full
+hook with `mounted`/`updated`/`destroyed`, HEEx fragment with the
+right `phx-update` strategy, server↔client wire shape, and 1–2 pitfall
+callouts per library.
+
 ## SVG Interactions
 
 SVG elements work with LiveView bindings. Click coordinates are available via `offsetX`/`offsetY`:
@@ -1061,32 +1070,13 @@ end
 
 ### Chart via Hook (External Libraries)
 
-When SVG components aren't enough, use Chart.js/D3 via hooks:
-
-```javascript
-Hooks.Chart = {
-  mounted() {
-    this.chart = new Chart(this.el, {
-      type: "line",
-      data: JSON.parse(this.el.dataset.chartData),
-      options: { responsive: true, animation: false }
-    })
-  },
-  updated() {
-    const newData = JSON.parse(this.el.dataset.chartData)
-    this.chart.data = newData
-    this.chart.update("none")  // No animation on update
-  },
-  destroyed() { this.chart.destroy() }
-}
-```
-
-```heex
-<canvas id="metrics-chart" phx-hook="Chart"
-        data-chart-data={Jason.encode!(@chart_data)}></canvas>
-```
-
-**Note:** Use `phx-update="ignore"` if the hook manages all DOM updates. Omit it (as above) when you want LiveView to update `data-*` attributes that trigger `updated()`.
+When SVG components aren't enough, use Chart.js or D3 via hooks. The
+full Chart.js recipe — including the live-append-vs-redraw decision,
+animation control, and type-change handling — is in
+[js-recipes.md](js-recipes.md#chartjs). D3 follows the same general
+shape: own the SVG sub-tree with `phx-update="ignore"`, drive via
+`data-*` attribute changes in `updated()`, dispose any timers /
+observers in `destroyed()`.
 
 ## Drag-and-Drop with SortableJS
 
@@ -1322,6 +1312,24 @@ end
 ```
 
 For external uploads (S3), streaming uploads (UploadWriter), and programmatic uploads from hooks, see [examples.md](examples.md).
+
+#### `<.live_file_input>` id-duplication trap
+
+The component auto-generates an `id` attribute on the underlying `<input>` from `@uploads.<name>.ref`. **Do not pass a custom `id=` to the component** — it emits a *duplicate* `id` attribute on the same `<input>`, and browsers honor only the first.
+
+To wire a styled `<label>` (or any element with `for=`) as the file picker, point `for=` at `@uploads.<name>.ref` directly. **NEVER** pass a custom `id=` to `<.live_file_input>`:
+
+```heex
+<!-- BAD: emits <input id="pdf-input" id="phx-F4...AB"> — label won't match -->
+<label for="pdf-input">Choose PDF</label>
+<.live_file_input upload={@uploads.pdf} id="pdf-input" />
+
+<!-- GOOD: label points at the auto-generated id -->
+<label for={@uploads.pdf.ref}>Choose PDF</label>
+<.live_file_input upload={@uploads.pdf} />
+```
+
+The duplicate is silent in dev — only discoverable by inspecting the rendered HTML or by the label being unclickable.
 
 ### File Downloads from LiveView
 
@@ -1974,6 +1982,7 @@ For the Membrane multimedia framework (RTMP ingestion, HLS packaging, ABR transc
 
 - **[reference.md](reference.md)** — Callback signatures, JS commands, form bindings, upload options, test helpers, socket return values
 - **[examples.md](examples.md)** — Complete worked examples: full LiveView with all callbacks, modal component, search with debounce, custom input components (checkgroups), advanced nested forms, SortableJS drag-and-drop, accessible focus management, server-triggered JS (execJS), UploadWriter streaming uploads, component libraries, controller-delegated form testing
+- **[js-recipes.md](js-recipes.md)** — Worked hook patterns for common third-party widgets: pdf.js, Chart.js, Monaco Editor, CodeMirror 6, Leaflet. Each recipe covers install, full mounted/updated/destroyed hook, HEEx with the right phx-update strategy, server↔client wire shape, and library-specific pitfalls
 - **[alpine.md](alpine.md)** — Alpine.js directives, magic properties, stores, UI components, debugging
 - **[state-persistence.md](state-persistence.md)** — Saving/restoring state with browser storage hooks, Phoenix.Token encryption, connect params optimization
 - **[wasm.md](wasm.md)** — WebAssembly integration with LiveView hooks: Exclosured (Rust→WASM), Orb (Elixir→WASM), use cases
